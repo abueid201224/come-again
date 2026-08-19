@@ -6,12 +6,8 @@ import {
   Printer, 
   Trash2, 
   Search, 
-  Filter, 
-  Download, 
   CheckCircle2,
-  Calendar,
-  Layers,
-  ArrowUpDown
+  Hash
 } from 'lucide-react';
 import type { AuditDiscrepancy } from '../types';
 import { exportErrorReportToExcel, exportErrorReportToPdf } from '../services/excelService';
@@ -43,6 +39,10 @@ export const ErrorReportScreen: React.FC<ErrorReportScreenProps> = ({
   const shortageCount = discrepancies.filter(d => d.qtyStatus === 'SHORTAGE').length;
   const surplusCount = discrepancies.filter(d => d.qtyStatus === 'SURPLUS').length;
 
+  const hasAnyOrderNo = useMemo(() => {
+    return discrepancies.some(d => Boolean(d.orderNo));
+  }, [discrepancies]);
+
   // Filtered list
   const filteredDiscrepancies = useMemo(() => {
     return discrepancies.filter((d) => {
@@ -59,6 +59,7 @@ export const ErrorReportScreen: React.FC<ErrorReportScreenProps> = ({
         const query = searchTerm.toLowerCase();
         return (
           d.invoiceNo.toLowerCase().includes(query) ||
+          (d.orderNo && d.orderNo.toLowerCase().includes(query)) ||
           d.itemCode.toLowerCase().includes(query) ||
           d.itemName.toLowerCase().includes(query)
         );
@@ -96,9 +97,9 @@ export const ErrorReportScreen: React.FC<ErrorReportScreenProps> = ({
                 <AlertTriangle className="w-5 h-5" />
               </span>
               <div>
-                <h2 className="text-lg sm:text-xl font-bold text-white">Permanent Error Audit Report</h2>
+                <h2 className="text-lg sm:text-xl font-bold text-white">Permanent Error & Discrepancy Audit Report</h2>
                 <p className="text-xs text-slate-400">
-                  Archived discrepancies, item mismatches, shortages & surpluses from audited invoices
+                  Archived discrepancies, item mismatches, shortages & surpluses from audited invoices and orders
                 </p>
               </div>
             </div>
@@ -159,30 +160,28 @@ export const ErrorReportScreen: React.FC<ErrorReportScreenProps> = ({
             <span className="text-xl font-bold font-mono text-red-300 mt-0.5 block">{mismatchCount}</span>
           </div>
           <div className="bg-amber-950/40 border border-amber-800/50 p-3 rounded-lg">
-            <span className="text-amber-400 block text-[11px]">Qty Shortages</span>
+            <span className="text-amber-400 block text-[11px]">Quantity Shortages</span>
             <span className="text-xl font-bold font-mono text-amber-300 mt-0.5 block">{shortageCount}</span>
           </div>
           <div className="bg-purple-950/40 border border-purple-800/50 p-3 rounded-lg">
-            <span className="text-purple-400 block text-[11px]">Qty Surpluses</span>
+            <span className="text-purple-400 block text-[11px]">Quantity Surpluses</span>
             <span className="text-xl font-bold font-mono text-purple-300 mt-0.5 block">{surplusCount}</span>
           </div>
         </div>
 
-        {/* Filter and Search Bar */}
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1 text-xs">
-          {/* Search box */}
+        {/* Filters */}
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
           <div className="relative flex-1">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Search by Invoice, SKU, or Item Name..."
+              placeholder="Search by Order #, Invoice #, Item Code, or Name..."
               className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-500 text-xs"
             />
           </div>
 
-          {/* Invoice dropdown */}
           <select
             value={selectedInvoice}
             onChange={(e) => setSelectedInvoice(e.target.value)}
@@ -194,7 +193,6 @@ export const ErrorReportScreen: React.FC<ErrorReportScreenProps> = ({
             ))}
           </select>
 
-          {/* Error Type dropdown */}
           <select
             value={selectedType}
             onChange={(e) => setSelectedType(e.target.value as unknown as 'ALL')}
@@ -219,7 +217,8 @@ export const ErrorReportScreen: React.FC<ErrorReportScreenProps> = ({
           <table className="w-full text-left border-collapse text-xs sm:text-sm font-sans">
             <thead className="bg-slate-950 text-slate-400 font-mono text-[11px] border-b border-slate-800 uppercase tracking-wider">
               <tr>
-                <th className="p-3 pl-4">Invoice No</th>
+                {hasAnyOrderNo && <th className="p-3 pl-4">Order No</th>}
+                <th className={`p-3 ${!hasAnyOrderNo ? 'pl-4' : ''}`}>Invoice No</th>
                 <th className="p-3">Item Code & Name</th>
                 <th className="p-3 text-center">Unit</th>
                 <th className="p-3 text-center">Req</th>
@@ -233,7 +232,7 @@ export const ErrorReportScreen: React.FC<ErrorReportScreenProps> = ({
             <tbody className="divide-y divide-slate-800/70 text-slate-200 font-mono">
               {filteredDiscrepancies.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="p-8 text-center text-slate-500 font-sans">
+                  <td colSpan={hasAnyOrderNo ? 10 : 9} className="p-8 text-center text-slate-500 font-sans">
                     {discrepancies.length === 0 ? (
                       <div className="space-y-1">
                         <CheckCircle2 className="w-8 h-8 text-emerald-500 mx-auto" />
@@ -258,8 +257,17 @@ export const ErrorReportScreen: React.FC<ErrorReportScreenProps> = ({
                       key={d.id || index}
                       className="hover:bg-slate-800/40 transition-colors"
                     >
+                      {/* Order No */}
+                      {hasAnyOrderNo && (
+                        <td className="p-3 pl-4">
+                          <span className="text-xs font-mono font-semibold text-indigo-300 bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-700/40">
+                            {d.orderNo || '-'}
+                          </span>
+                        </td>
+                      )}
+
                       {/* Invoice No */}
-                      <td className="p-3 pl-4 font-bold text-amber-400">
+                      <td className={`p-3 ${!hasAnyOrderNo ? 'pl-4' : ''} font-bold text-amber-400`}>
                         {d.invoiceNo}
                       </td>
 
@@ -300,28 +308,27 @@ export const ErrorReportScreen: React.FC<ErrorReportScreenProps> = ({
                             MISMATCH
                           </span>
                         ) : isShortage ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-950 text-amber-400 border border-amber-700">
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-950 text-amber-400 border border-amber-800">
                             SHORTAGE
                           </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-purple-950 text-purple-400 border border-purple-700">
+                        ) : isSurplus ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-purple-950 text-purple-400 border border-purple-800">
                             SURPLUS
                           </span>
-                        )}
+                        ) : null}
                       </td>
 
-                      {/* Audited Time */}
-                      <td className="p-3 text-center text-[11px] text-slate-400 font-sans">
-                        {new Date(d.auditedAt).toLocaleDateString([], { month: 'numeric', day: 'numeric' })}{' '}
-                        {new Date(d.auditedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {/* Timestamp */}
+                      <td className="p-3 text-center text-slate-400 text-xs font-mono">
+                        {new Date(d.auditedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
                       </td>
 
-                      {/* Delete item */}
+                      {/* Delete item action */}
                       <td className="p-3 pr-4 text-right">
                         <button
                           onClick={() => handleDeleteItem(d.id)}
-                          className="p-1 rounded text-slate-500 hover:text-red-400 hover:bg-slate-800 transition-colors"
-                          title="Delete entry"
+                          className="p-1 text-slate-500 hover:text-red-400 rounded hover:bg-slate-800 transition-colors"
+                          title="Delete record"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   ScanLine, 
   Lock, 
@@ -10,91 +10,224 @@ import {
   RotateCcw, 
   Package, 
   FileText, 
-  ArrowRight,
-  Sparkles,
-  Zap,
-  HelpCircle
+  ArrowRight, 
+  Sparkles, 
+  Zap, 
+  ArrowUpDown, 
+  QrCode, 
+  Camera,
+  Hash,
+  Clock,
+  CheckCheck,
+  AlertCircle,
+  PauseCircle,
+  Play,
+  Trash2,
+  Layers,
+  ShieldAlert,
+  Archive
 } from 'lucide-react';
 import type { 
   ActiveInvoiceSession, 
   MasterInvoiceItem, 
   ScannedAuditItem, 
-  AuditDiscrepancy 
+  AuditDiscrepancy,
+  AppSettings,
+  IncompleteInvoiceRecord,
+  CompletedInvoiceRecord
 } from '../types';
 import { 
   getInvoiceMasterItems, 
   saveActiveSession, 
   saveAuditDiscrepancies, 
   saveAuditHistory,
-  getAllUniqueInvoices
+  getAllUniqueInvoices,
+  isInvoiceCompleted,
+  markInvoiceAsCompleted,
+  getAllCompletedInvoices,
+  reopenCompletedInvoice,
+  saveIncompleteInvoice,
+  getAllIncompleteInvoices,
+  getIncompleteInvoice,
+  deleteIncompleteInvoice,
+  getInvoicesAuditSummaryStats
 } from '../services/db';
 import { SoundEffects } from '../services/audio';
+import { translations } from '../services/i18n';
+import { CameraQrScannerModal } from './CameraQrScannerModal';
 
 interface ActiveAuditScreenProps {
   activeSession: ActiveInvoiceSession | null;
   setActiveSession: (session: ActiveInvoiceSession | null) => void;
-  soundEnabled: boolean;
-  vibrationEnabled: boolean;
-  onInvoiceCompleted: (invoiceNo: string, discarded: number, discrepancies: AuditDiscrepancy[]) => void;
+  settings: AppSettings;
+  onUpdateSettings: (newSettings: AppSettings) => void;
+  onInvoiceCompleted: (
+    invoiceNo: string, 
+    discarded: number, 
+    discrepancies: AuditDiscrepancy[], 
+    totalRequiredQty: number, 
+    totalScannedQty: number, 
+    totalLineItems: number
+  ) => void;
   onOpenSyncModal: () => void;
   lastScannedCode: string | null;
+}
+
+// Normalizes barcode strings to ensure robust random matching (ignores leading zeroes and whitespace)
+function findMatchingItemKey(items: Record<string, ScannedAuditItem>, code: string): string | null {
+  const clean = code.trim();
+  if (items[clean]) return clean;
+
+  const cleanLower = clean.toLowerCase();
+  const strippedClean = clean.replace(/^0+/, '');
+
+  for (const key of Object.keys(items)) {
+    if (key.toLowerCase() === cleanLower) return key;
+    if (strippedClean && key.replace(/^0+/, '').toLowerCase() === strippedClean.toLowerCase()) return key;
+  }
+  return null;
 }
 
 export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
   activeSession,
   setActiveSession,
-  soundEnabled,
-  vibrationEnabled,
+  settings,
+  onUpdateSettings,
   onInvoiceCompleted,
   onOpenSyncModal,
   lastScannedCode,
 }) => {
+  const t = translations[settings.language] || translations.en;
+  const isRtl = settings.language === 'ar';
+
   const [manualInput, setManualInput] = useState('');
-  const [availableInvoices, setAvailableInvoices] = useState<{ invoiceNo: string; itemCount: number; totalQty: number }[]>([]);
+  const [availableInvoices, setAvailableInvoices] = useState<{ invoiceNo: string; orderNo?: string; itemCount: number; totalQty: number }[]>([]);
+  const [completedInvoices, setCompletedInvoices] = useState<CompletedInvoiceRecord[]>([]);
+  const [incompleteInvoices, setIncompleteInvoices] = useState<IncompleteInvoiceRecord[]>([]);
+  
   const [isLoadingInvoice, setIsLoadingInvoice] = useState(false);
   const [activeTabFilter, setActiveTabFilter] = useState<'ALL' | 'PENDING' | 'EXACT' | 'DISCREPANCIES'>('ALL');
-  const [recentScanFeedback, setRecentScanFeedback] = useState<{ code: string; message: string; type: 'match' | 'exact' | 'mismatch' | 'surplus' } | null>(null);
+  const [isCameraQrOpen, setIsCameraQrOpen] = useState(false);
+  const [isIncompleteDrawerOpen, setIsIncompleteDrawerOpen] = useState(false);
+  
+  // Blocked Completed Invoice Warning Modal
+  const [blockedInvoiceWarning, setBlockedInvoiceWarning] = useState<{
+    invoiceNo: string;
+    completedRecord: CompletedInvoiceRecord;
+  } | null>(null);
+
+  const [recentScanFeedback, setRecentScanFeedback] = useState<{ 
+    code: string; 
+    message: string; 
+    type: 'match' | 'exact' | 'mismatch' | 'surplus' | 'blocked';
+    itemName?: string;
+    currentQty?: number;
+    reqQty?: number;
+    unit?: string;
+  } | null>(null);
 
   const scannerInputRef = useRef<HTMLInputElement>(null);
 
-  // Load available invoices list for quick pickers
+  // Load available invoices list, completed list, and incomplete list
   useEffect(() => {
-    loadInvoicesList();
+    loadAllAuditData();
   }, [activeSession]);
 
-  const loadInvoicesList = async () => {
+  const loadAllAuditData = async () => {
     try {
-      const list = await getAllUniqueInvoices();
-      setAvailableInvoices(list);
+      const [allInvs, completedList, incompleteList] = await Promise.all([
+        getAllUniqueInvoices(),
+        getAllCompletedInvoices(),
+        getAllIncompleteInvoices(),
+      ]);
+      setAvailableInvoices(allInvs);
+      setCompletedInvoices(completedList);
+      setIncompleteInvoices(incompleteList);
     } catch (err) {
-      console.error('Failed to load invoice list', err);
+      console.error('Failed to load audit data', err);
     }
   };
 
-  // Keep scanner input focused on mobile/desktop for hardware wedge readiness
+  // Keep scanner input focused for hardware wedge readiness and auto-clearing
+  const focusAndClearInput = () => {
+    setManualInput('');
+    setTimeout(() => {
+      scannerInputRef.current?.focus();
+    }, 50);
+  };
+
   useEffect(() => {
     const timer = setTimeout(() => {
       scannerInputRef.current?.focus();
     }, 100);
     return () => clearTimeout(timer);
-  }, [activeSession]);
+  }, [activeSession, isCameraQrOpen, blockedInvoiceWarning]);
 
-  // STEP A: Lock into an Invoice session
-  const lockInvoiceSession = async (invoiceNoInput: string) => {
-    const invoiceNo = invoiceNoInput.trim();
-    if (!invoiceNo) return;
+  // STEP A: Lock into an Invoice session (by Invoice Number OR Order Number)
+  const lockInvoiceSession = async (invoiceNoInput: string, forceReopen = false) => {
+    const cleanInput = invoiceNoInput.trim();
+    if (!cleanInput) return;
 
     setIsLoadingInvoice(true);
     try {
-      const masterItems = await getInvoiceMasterItems(invoiceNo);
+      // 1. CHECK IF INVOICE IS ALREADY COMPLETED (Prevent duplicate scanning)
+      if (!forceReopen) {
+        const completedRecord = await isInvoiceCompleted(cleanInput);
+        if (completedRecord) {
+          if (settings.soundEnabled) SoundEffects.playAlreadyCompletedBlocked(settings.soundVolume);
+          if (settings.vibrationEnabled) SoundEffects.vibrate([200, 100, 200, 100, 200]);
 
-      // Create new session
+          setBlockedInvoiceWarning({
+            invoiceNo: completedRecord.invoiceNo,
+            completedRecord,
+          });
+
+          setRecentScanFeedback({
+            code: completedRecord.invoiceNo,
+            message: isRtl 
+              ? `⚠️ الفاتورة [${completedRecord.invoiceNo}] مكتملة ومقفلة مسبقاً! تم منع تكرار المسح.`
+              : `⚠️ Invoice [${completedRecord.invoiceNo}] is already COMPLETED and closed! Duplicate scan blocked.`,
+            type: 'blocked',
+          });
+
+          focusAndClearInput();
+          return;
+        }
+      }
+
+      // 2. CHECK IF INVOICE WAS PREVIOUSLY DEFERRED AS INCOMPLETE (Resume State!)
+      const savedIncomplete = await getIncompleteInvoice(cleanInput);
+      if (savedIncomplete && !forceReopen) {
+        // Resume previous incomplete session with scanned counts preserved!
+        await saveActiveSession(savedIncomplete.session);
+        setActiveSession(savedIncomplete.session);
+
+        if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
+        if (settings.vibrationEnabled) SoundEffects.vibrate(100);
+
+        setRecentScanFeedback({
+          code: savedIncomplete.invoiceNo,
+          message: isRtl 
+            ? `تم استرجاع الفاتورة المرحلة [${savedIncomplete.invoiceNo}] بنجاح (${savedIncomplete.completedItemsCount}/${savedIncomplete.totalItemsCount} صنف مكتمل). يمكنك استكمال مسح النواقص الآن.`
+            : `Resumed Incomplete Invoice [${savedIncomplete.invoiceNo}] (${savedIncomplete.completedItemsCount}/${savedIncomplete.totalItemsCount} items completed). Ready to scan shortages.`,
+          type: 'match',
+        });
+
+        focusAndClearInput();
+        return;
+      }
+
+      // 3. FRESH INVOICE INITIALIZATION FROM MASTER DATA
+      const masterItems = await getInvoiceMasterItems(cleanInput);
+      const effectiveInvoiceNo = masterItems.length > 0 ? masterItems[0].invoiceNo : cleanInput;
+      const effectiveOrderNo = masterItems.length > 0 ? masterItems[0].orderNo : undefined;
+
       const initialItems: Record<string, ScannedAuditItem> = {};
       const now = new Date().toISOString();
 
-      // Populate known items with Actual_Qty = 0
-      masterItems.forEach((m) => {
+      masterItems.forEach((m, idx) => {
         initialItems[m.itemCode] = {
+          orderNo: m.orderNo,
           itemCode: m.itemCode,
           itemName: m.itemName,
           unit: m.unit,
@@ -104,39 +237,46 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
           qtyStatus: 'SHORTAGE', // 0 < reqQty
           lastScannedAt: now,
           scanHistory: [],
+          originalIndex: m.originalIndex !== undefined ? m.originalIndex : idx,
         };
       });
 
       const newSession: ActiveInvoiceSession = {
-        invoiceNo,
+        invoiceNo: effectiveInvoiceNo,
+        orderNo: effectiveOrderNo,
         startedAt: now,
         lastActivityAt: now,
         items: initialItems,
         isLocked: true,
+        lastScannedItemCode: null,
       };
 
       await saveActiveSession(newSession);
       setActiveSession(newSession);
 
-      if (soundEnabled) SoundEffects.playInvoiceLock();
-      if (vibrationEnabled) SoundEffects.vibrate(100);
+      if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
+      if (settings.vibrationEnabled) SoundEffects.vibrate(100);
 
       setRecentScanFeedback({
-        code: invoiceNo,
+        code: effectiveInvoiceNo,
         message: masterItems.length > 0 
-          ? `Locked Invoice ${invoiceNo} (${masterItems.length} items to audit). Ready for item scans.`
-          : `Invoice ${invoiceNo} not in master file, but session initialized for auditing.`,
+          ? (isRtl 
+              ? `تم قفل الفاتورة ${effectiveInvoiceNo}${effectiveOrderNo ? ` (أوردر: ${effectiveOrderNo})` : ''} - (${masterItems.length} صنف). جاهز للإسكان العشوائي.` 
+              : `Locked Invoice ${effectiveInvoiceNo}${effectiveOrderNo ? ` (Order: ${effectiveOrderNo})` : ''} - (${masterItems.length} items). Ready for random scanning.`)
+          : (isRtl 
+              ? `الفاتورة ${cleanInput} غير مدرجة بالملف، ولكن تم تهيئة الجلسة.` 
+              : `Invoice ${cleanInput} not in master file, but session initialized.`),
         type: 'match',
       });
     } catch (err) {
       console.error('Failed to lock invoice session', err);
     } finally {
       setIsLoadingInvoice(false);
-      setManualInput('');
+      focusAndClearInput();
     }
   };
 
-  // STEP B: Handle Item Scan in active invoice session
+  // STEP B: Handle Random Item Scan (Works for ANY item in ANY order at ANY time)
   const handleItemScan = async (scannedItemCode: string) => {
     if (!activeSession) return;
     const cleanCode = scannedItemCode.trim();
@@ -146,42 +286,43 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
     const items = { ...session.items };
     const now = new Date().toISOString();
 
-    let targetItem = items[cleanCode];
-
-    if (!targetItem) {
-      // Check if it exists with case-insensitivity
-      const matchingKey = Object.keys(items).find(k => k.toLowerCase() === cleanCode.toLowerCase());
-      if (matchingKey) {
-        targetItem = items[matchingKey];
-      }
-    }
+    const matchingKey = findMatchingItemKey(items, cleanCode);
+    let targetItem = matchingKey ? items[matchingKey] : null;
 
     let feedbackType: 'match' | 'exact' | 'mismatch' | 'surplus' = 'match';
     let feedbackMsg = '';
+    let resolvedItemCode = cleanCode;
 
     if (targetItem) {
       // ITEM BELONGS TO INVOICE (Code_Status: MATCH)
+      resolvedItemCode = targetItem.itemCode;
       const newActualQty = targetItem.actualQty + 1;
       let newQtyStatus: 'EXACT' | 'SHORTAGE' | 'SURPLUS' = 'SHORTAGE';
 
       if (newActualQty === targetItem.requiredQty) {
         newQtyStatus = 'EXACT';
         feedbackType = 'exact';
-        feedbackMsg = `EXACT MATCH! [${cleanCode}] count reached required ${targetItem.requiredQty} ${targetItem.unit}`;
-        if (soundEnabled) SoundEffects.playExactComplete();
-        if (vibrationEnabled) SoundEffects.vibrate([80, 50, 80]);
+        feedbackMsg = isRtl 
+          ? `مطابقة تامة! الصنف [${resolvedItemCode}] وصل للعدد المطلوب بالكامل (${targetItem.requiredQty} ${targetItem.unit})` 
+          : `EXACT MATCH! [${resolvedItemCode}] reached required ${targetItem.requiredQty} ${targetItem.unit}`;
+        if (settings.soundEnabled) SoundEffects.playExactComplete(settings.soundVolume);
+        if (settings.vibrationEnabled) SoundEffects.vibrate([80, 50, 80]);
       } else if (newActualQty > targetItem.requiredQty) {
         newQtyStatus = 'SURPLUS';
         feedbackType = 'surplus';
-        feedbackMsg = `SURPLUS WARNING! [${cleanCode}] count ${newActualQty} exceeds required ${targetItem.requiredQty}`;
-        if (soundEnabled) SoundEffects.playSurplusAlert();
-        if (vibrationEnabled) SoundEffects.vibrate([150, 100, 150]);
+        feedbackMsg = isRtl 
+          ? `تحذير زيادة! الصنف [${resolvedItemCode}] أصبح (${newActualQty}) وتجاوز المطلوب (${targetItem.requiredQty} ${targetItem.unit})` 
+          : `SURPLUS WARNING! [${resolvedItemCode}] count ${newActualQty} exceeds required ${targetItem.requiredQty}`;
+        if (settings.soundEnabled) SoundEffects.playSurplusAlert(settings.soundVolume);
+        if (settings.vibrationEnabled) SoundEffects.vibrate([150, 100, 150]);
       } else {
         newQtyStatus = 'SHORTAGE';
         feedbackType = 'match';
-        feedbackMsg = `Item [${cleanCode}] +1 (Scanned ${newActualQty} of ${targetItem.requiredQty} ${targetItem.unit})`;
-        if (soundEnabled) SoundEffects.playScanMatch();
-        if (vibrationEnabled) SoundEffects.vibrate(40);
+        feedbackMsg = isRtl 
+          ? `الصنف [${resolvedItemCode}] +1 (تم مسح ${newActualQty} من ${targetItem.requiredQty} ${targetItem.unit})` 
+          : `Item [${resolvedItemCode}] +1 (Scanned ${newActualQty} of ${targetItem.requiredQty} ${targetItem.unit})`;
+        if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+        if (settings.vibrationEnabled) SoundEffects.vibrate(40);
       }
 
       items[targetItem.itemCode] = {
@@ -194,13 +335,16 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
     } else {
       // ITEM DOES NOT BELONG TO INVOICE (Code_Status: MISMATCH)
       feedbackType = 'mismatch';
-      feedbackMsg = `MISMATCH ALERT! Item [${cleanCode}] is NOT listed in Invoice ${session.invoiceNo}!`;
-      if (soundEnabled) SoundEffects.playMismatchWarning();
-      if (vibrationEnabled) SoundEffects.vibrate([200, 100, 200, 100, 200]);
+      feedbackMsg = isRtl 
+        ? `صنف غير مدرج! الباركود [${cleanCode}] ليس من أصناف الفاتورة ${session.invoiceNo}!` 
+        : `MISMATCH ALERT! Item [${cleanCode}] is NOT listed in Invoice ${session.invoiceNo}!`;
+      if (settings.soundEnabled) SoundEffects.playMismatchWarning(settings.soundVolume);
+      if (settings.vibrationEnabled) SoundEffects.vibrate([200, 100, 200, 100, 200]);
 
       items[cleanCode] = {
+        orderNo: session.orderNo,
         itemCode: cleanCode,
-        itemName: `Unknown Item (${cleanCode})`,
+        itemName: isRtl ? `صنف غير مدرج (${cleanCode})` : `Unknown Item (${cleanCode})`,
         unit: 'PCS',
         requiredQty: 0,
         actualQty: 1,
@@ -208,21 +352,28 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
         qtyStatus: 'SURPLUS',
         lastScannedAt: now,
         scanHistory: [now],
+        originalIndex: 9999 + Object.keys(items).length,
       };
+      targetItem = items[cleanCode];
     }
 
     session.items = items;
     session.lastActivityAt = now;
+    session.lastScannedItemCode = resolvedItemCode;
 
     setRecentScanFeedback({
-      code: cleanCode,
+      code: resolvedItemCode,
+      itemName: targetItem?.itemName,
+      currentQty: targetItem?.actualQty,
+      reqQty: targetItem?.requiredQty,
+      unit: targetItem?.unit,
       message: feedbackMsg,
       type: feedbackType,
     });
 
     await saveActiveSession(session);
     setActiveSession(session);
-    setManualInput('');
+    focusAndClearInput();
   };
 
   // Manual Adjustments (+, -, Reset)
@@ -244,20 +395,22 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
       else newQtyStatus = 'SHORTAGE';
     }
 
+    const now = new Date().toISOString();
     items[itemCode] = {
       ...item,
       actualQty: newQty,
       qtyStatus: newQtyStatus,
-      lastScannedAt: new Date().toISOString(),
+      lastScannedAt: now,
     };
 
     session.items = items;
+    session.lastScannedItemCode = itemCode;
     await saveActiveSession(session);
     setActiveSession(session);
   };
 
-  // STEP 5: Invoice Switching & Automatic Cleanup (CRITICAL)
-  const completeAndSwitchInvoice = async (newInvoiceNoToLock?: string) => {
+  // ACTION 1: Complete and Finalize Invoice (100% Exact or Finalizing with Error Report)
+  const handleFinalizeInvoice = async (markCompletedAsExact = false, nextInvoiceToLock?: string) => {
     if (!activeSession) return;
 
     const session = activeSession;
@@ -266,17 +419,20 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
 
     let cleanDiscardedCount = 0;
     const discrepanciesToArchive: AuditDiscrepancy[] = [];
+    let totalReqQty = 0;
+    let totalActQty = 0;
 
     // Evaluate each row
     for (const item of allItems) {
+      totalReqQty += item.requiredQty;
+      totalActQty += item.actualQty;
       const isExactMatch = item.codeStatus === 'MATCH' && item.qtyStatus === 'EXACT';
 
       if (isExactMatch) {
-        // 2. AUTOMATICALLY DELETE/DISCARD all fully correct items
         cleanDiscardedCount += 1;
       } else {
-        // 3. AUTOMATICALLY SAVE & ARCHIVE only the discrepancies/errors into Error Audit Report
         discrepanciesToArchive.push({
+          orderNo: session.orderNo || item.orderNo,
           invoiceNo: session.invoiceNo,
           itemCode: item.itemCode,
           itemName: item.itemName,
@@ -288,95 +444,332 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
           difference: item.actualQty - item.requiredQty,
           auditedAt,
           notes: item.codeStatus === 'MISMATCH' 
-            ? 'Item not present in invoice manifest' 
+            ? (isRtl ? 'صنف غير مدرج بالفاتورة' : 'Item not present in invoice manifest')
             : item.qtyStatus === 'SHORTAGE' 
-              ? `Shortage of ${item.requiredQty - item.actualQty} ${item.unit}` 
-              : `Surplus of ${item.actualQty - item.requiredQty} ${item.unit}`,
+              ? (isRtl ? `نقص بقيمة ${item.requiredQty - item.actualQty} ${item.unit}` : `Shortage of ${item.requiredQty - item.actualQty} ${item.unit}`)
+              : (isRtl ? `زيادة بقيمة ${item.actualQty - item.requiredQty} ${item.unit}` : `Surplus of ${item.actualQty - item.requiredQty} ${item.unit}`),
         });
       }
     }
 
-    // Save to permanent IndexedDB error store
     if (discrepanciesToArchive.length > 0) {
       await saveAuditDiscrepancies(discrepanciesToArchive);
     }
 
-    // Save session history record
     const startTime = new Date(session.startedAt).getTime();
     const endTime = new Date().getTime();
     const durationSeconds = Math.max(1, Math.round((endTime - startTime) / 1000));
 
+    // Save to audit history
     await saveAuditHistory({
+      orderNo: session.orderNo,
       invoiceNo: session.invoiceNo,
       totalRequiredItems: allItems.filter(i => i.codeStatus === 'MATCH').length,
+      totalRequiredQty: totalReqQty,
+      totalScannedQty: totalActQty,
       scannedItemsCount: allItems.reduce((acc, curr) => acc + curr.actualQty, 0),
       exactItemsCount: cleanDiscardedCount,
       discrepancyCount: discrepanciesToArchive.length,
-      status: discrepanciesToArchive.length === 0 ? 'CLEAN' : 'DISCREPANCIES_FOUND',
+      status: discrepanciesToArchive.length === 0 ? 'COMPLETED' : 'DISCREPANCIES_FOUND',
       completedAt: auditedAt,
       durationSeconds,
     });
 
-    // Clear active session from DB
+    // If completely clean or marked completed, lock it to prevent duplicate scans
+    if (discrepanciesToArchive.length === 0 || markCompletedAsExact) {
+      await markInvoiceAsCompleted({
+        invoiceNo: session.invoiceNo,
+        orderNo: session.orderNo,
+        completedAt: auditedAt,
+        totalItems: allItems.length,
+        totalQty: totalActQty,
+      });
+
+      if (settings.soundEnabled) SoundEffects.playInvoiceFinished(settings.soundVolume);
+    }
+
+    // Delete any pending incomplete record since it's now completed
+    await deleteIncompleteInvoice(session.invoiceNo);
+
+    // Clear active session
     await saveActiveSession(null);
     setActiveSession(null);
 
-    // Trigger completion modal notification
-    onInvoiceCompleted(session.invoiceNo, cleanDiscardedCount, discrepanciesToArchive);
+    // Reload lists
+    await loadAllAuditData();
 
-    // If a new invoice barcode was scanned, immediately lock onto it!
-    if (newInvoiceNoToLock && newInvoiceNoToLock !== session.invoiceNo) {
+    onInvoiceCompleted(
+      session.invoiceNo, 
+      cleanDiscardedCount, 
+      discrepanciesToArchive, 
+      totalReqQty, 
+      totalActQty, 
+      allItems.filter(i => i.codeStatus === 'MATCH').length
+    );
+
+    focusAndClearInput();
+
+    if (nextInvoiceToLock && nextInvoiceToLock !== session.invoiceNo) {
       setTimeout(() => {
-        lockInvoiceSession(newInvoiceNoToLock);
-      }, 200);
+        lockInvoiceSession(nextInvoiceToLock);
+      }, 250);
     }
   };
 
-  // Form submit handler for manual/wedge input
-  const handleInputSubmit = (e: React.FormEvent) => {
+  // ACTION 2: Defer Invoice as Incomplete (Save scanned items & resume later)
+  const handleDeferAsIncomplete = async () => {
+    if (!activeSession) return;
+
+    const session = activeSession;
+    const allItems: ScannedAuditItem[] = Object.values(session.items);
+    const now = new Date().toISOString();
+
+    let completedItemsCount = 0;
+    let missingQty = 0;
+    let scannedQty = 0;
+    let totalRequiredQty = 0;
+
+    allItems.forEach((item) => {
+      totalRequiredQty += item.requiredQty;
+      scannedQty += item.actualQty;
+      if (item.codeStatus === 'MATCH' && item.qtyStatus === 'EXACT') {
+        completedItemsCount += 1;
+      }
+      if (item.codeStatus === 'MATCH' && item.actualQty < item.requiredQty) {
+        missingQty += (item.requiredQty - item.actualQty);
+      }
+    });
+
+    const incompleteRecord: IncompleteInvoiceRecord = {
+      invoiceNo: session.invoiceNo,
+      orderNo: session.orderNo,
+      savedAt: now,
+      session,
+      completedItemsCount,
+      totalItemsCount: allItems.filter(i => i.codeStatus === 'MATCH').length,
+      missingQty,
+      scannedQty,
+      totalRequiredQty,
+    };
+
+    await saveIncompleteInvoice(incompleteRecord);
+    await saveActiveSession(null);
+    setActiveSession(null);
+
+    await loadAllAuditData();
+
+    setRecentScanFeedback({
+      code: session.invoiceNo,
+      message: isRtl 
+        ? `تم ترحيل الفاتورة الناقصة [${session.invoiceNo}] للاستكمال لاحقاً مع حفظ كافة الأصناف الممسوحة (${scannedQty} قطعة).`
+        : `Deferred Incomplete Invoice [${session.invoiceNo}] for later completion (${scannedQty} units preserved).`,
+      type: 'surplus',
+    });
+
+    focusAndClearInput();
+  };
+
+  // Reopen a completed invoice for emergency supervisor re-audit
+  const handleReopenInvoice = async (invoiceNo: string) => {
+    await reopenCompletedInvoice(invoiceNo);
+    setBlockedInvoiceWarning(null);
+    await loadAllAuditData();
+    await lockInvoiceSession(invoiceNo, true);
+  };
+
+  const handleInputSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const code = manualInput.trim();
     if (!code) return;
 
     if (!activeSession) {
-      // Step A: Lock invoice
-      lockInvoiceSession(code);
+      await lockInvoiceSession(code);
     } else {
-      // Step B: Item scan OR Invoice switch check
-      // Check if user is scanning a known invoice barcode to switch
-      const isKnownInvoice = availableInvoices.some(inv => inv.invoiceNo.toLowerCase() === code.toLowerCase());
-      if (isKnownInvoice && code.toLowerCase() !== activeSession.invoiceNo.toLowerCase()) {
-        completeAndSwitchInvoice(code);
+      const isKnownInvoice = availableInvoices.some(inv => 
+        inv.invoiceNo.toLowerCase() === code.toLowerCase() || 
+        (inv.orderNo && inv.orderNo.toLowerCase() === code.toLowerCase())
+      );
+      if (isKnownInvoice && code.toLowerCase() !== activeSession.invoiceNo.toLowerCase() && code.toLowerCase() !== activeSession.orderNo?.toLowerCase()) {
+        // Completing current and switching to next
+        await handleFinalizeInvoice(false, code);
       } else {
-        handleItemScan(code);
+        await handleItemScan(code);
       }
     }
   };
 
-  // Computed metrics for active session
+  // Active session metrics calculation
   const itemsList: ScannedAuditItem[] = activeSession ? Object.values(activeSession.items) : [];
   const totalItemsRequired = itemsList.filter(i => i.codeStatus === 'MATCH').length;
   const exactCount = itemsList.filter(i => i.codeStatus === 'MATCH' && i.qtyStatus === 'EXACT').length;
   const shortageCount = itemsList.filter(i => i.codeStatus === 'MATCH' && i.qtyStatus === 'SHORTAGE').length;
   const surplusCount = itemsList.filter(i => i.qtyStatus === 'SURPLUS').length;
   const mismatchCount = itemsList.filter(i => i.codeStatus === 'MISMATCH').length;
-  const progressPercent = totalItemsRequired > 0 ? Math.round((exactCount / totalItemsRequired) * 100) : 0;
+  
+  const totalRequiredQuantity = itemsList.reduce((acc, curr) => acc + curr.requiredQty, 0);
+  const totalScannedQuantity = itemsList.reduce((acc, curr) => acc + curr.actualQty, 0);
+  
+  const progressPercent = totalRequiredQuantity > 0 
+    ? Math.min(100, Math.round((totalScannedQuantity / totalRequiredQuantity) * 100)) 
+    : 0;
 
-  // Filter items
-  const filteredItems = itemsList.filter((item) => {
-    if (activeTabFilter === 'PENDING') return item.qtyStatus === 'SHORTAGE';
-    if (activeTabFilter === 'EXACT') return item.qtyStatus === 'EXACT';
-    if (activeTabFilter === 'DISCREPANCIES') return item.codeStatus === 'MISMATCH' || item.qtyStatus === 'SURPLUS' || (item.actualQty > 0 && item.qtyStatus === 'SHORTAGE');
-    return true;
-  });
+  const isInvoice100PercentComplete = totalItemsRequired > 0 && exactCount === totalItemsRequired && mismatchCount === 0 && surplusCount === 0;
+
+  const hasAnyOrderNo = useMemo(() => {
+    return Boolean(activeSession?.orderNo || itemsList.some(i => Boolean(i.orderNo)));
+  }, [activeSession, itemsList]);
+
+  // Active last-scanned item object for the spotlight focus card
+  const lastScannedItem = useMemo(() => {
+    if (!activeSession?.lastScannedItemCode) return null;
+    return activeSession.items[activeSession.lastScannedItemCode] || null;
+  }, [activeSession]);
+
+  // Smart Sorting
+  const sortedAndFilteredItems = useMemo(() => {
+    let result = itemsList.filter((item) => {
+      if (activeTabFilter === 'PENDING') return item.qtyStatus === 'SHORTAGE';
+      if (activeTabFilter === 'EXACT') return item.qtyStatus === 'EXACT';
+      if (activeTabFilter === 'DISCREPANCIES') return item.codeStatus === 'MISMATCH' || item.qtyStatus === 'SURPLUS' || (item.actualQty > 0 && item.qtyStatus === 'SHORTAGE');
+      return true;
+    });
+
+    const mode = settings.itemSortMode || 'LAST_SCANNED';
+
+    result = [...result].sort((a, b) => {
+      if (mode === 'LAST_SCANNED') {
+        const timeA = a.lastScannedAt ? new Date(a.lastScannedAt).getTime() : 0;
+        const timeB = b.lastScannedAt ? new Date(b.lastScannedAt).getTime() : 0;
+        if (a.actualQty > 0 && b.actualQty === 0) return -1;
+        if (b.actualQty > 0 && a.actualQty === 0) return 1;
+        return timeB - timeA;
+      }
+      
+      if (mode === 'ORIGINAL_ORDER') {
+        return (a.originalIndex ?? 0) - (b.originalIndex ?? 0);
+      }
+
+      if (mode === 'PENDING_FIRST') {
+        if (a.qtyStatus === 'SHORTAGE' && b.qtyStatus !== 'SHORTAGE') return -1;
+        if (b.qtyStatus === 'SHORTAGE' && a.qtyStatus !== 'SHORTAGE') return 1;
+        return (a.originalIndex ?? 0) - (b.originalIndex ?? 0);
+      }
+
+      if (mode === 'ERRORS_FIRST') {
+        const aHasError = a.codeStatus === 'MISMATCH' || a.qtyStatus === 'SURPLUS';
+        const bHasError = b.codeStatus === 'MISMATCH' || b.qtyStatus === 'SURPLUS';
+        if (aHasError && !bHasError) return -1;
+        if (bHasError && !aHasError) return 1;
+        return (a.originalIndex ?? 0) - (b.originalIndex ?? 0);
+      }
+
+      return 0;
+    });
+
+    return result;
+  }, [itemsList, activeTabFilter, settings.itemSortMode]);
 
   return (
-    <div className="space-y-4">
-      {/* 1. TOP SCANNER INPUT & WEDGE STATUS BAR */}
+    <div className={`space-y-4 ${isRtl ? 'rtl text-right' : 'ltr text-left'}`} dir={isRtl ? 'rtl' : 'ltr'}>
+      {/* 🌟 1. GLOBAL AUDIT PROGRESS & KPI COUNTER BAR */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 bg-slate-900 border border-slate-800 rounded-xl p-3 shadow-md">
+        {/* Total Invoices */}
+        <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-lg flex items-center gap-2.5">
+          <div className="p-2 bg-blue-950/60 border border-blue-700/40 text-blue-400 rounded-lg shrink-0">
+            <FileText className="w-5 h-5" />
+          </div>
+          <div>
+            <span className="text-[11px] text-slate-400 block font-medium">{isRtl ? 'إجمالي الفواتير' : 'Total Invoices'}</span>
+            <div className="text-base sm:text-lg font-black font-mono text-white">{availableInvoices.length}</div>
+          </div>
+        </div>
+
+        {/* Completed Invoices (تسجيل الفواتير المكتملة) */}
+        <div className="bg-emerald-950/40 border border-emerald-800/50 p-2.5 rounded-lg flex items-center gap-2.5">
+          <div className="p-2 bg-emerald-900/60 border border-emerald-600/40 text-emerald-400 rounded-lg shrink-0">
+            <CheckCheck className="w-5 h-5" />
+          </div>
+          <div>
+            <span className="text-[11px] text-emerald-400 block font-medium">{isRtl ? 'فواتير مكتملة ومقفلة' : 'Completed Invoices'}</span>
+            <div className="text-base sm:text-lg font-black font-mono text-emerald-300">
+              {completedInvoices.length} <span className="text-xs text-slate-400 font-normal">/ {availableInvoices.length}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Incomplete Invoices (الفواتير الناقصة والمرحلة) */}
+        <button 
+          onClick={() => setIsIncompleteDrawerOpen(true)}
+          className="bg-amber-950/40 border border-amber-800/50 hover:bg-amber-950/70 p-2.5 rounded-lg flex items-center justify-between text-left transition-all group"
+        >
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 bg-amber-900/60 border border-amber-600/40 text-amber-400 rounded-lg shrink-0">
+              <PauseCircle className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-[11px] text-amber-400 block font-medium">{isRtl ? 'فواتير مرحلة للاستكمال' : 'Incomplete Queue'}</span>
+              <div className="text-base sm:text-lg font-black font-mono text-amber-300">
+                {incompleteInvoices.length} <span className="text-xs text-slate-400 font-normal">{isRtl ? 'ناقصة' : 'pending'}</span>
+              </div>
+            </div>
+          </div>
+          {incompleteInvoices.length > 0 && (
+            <span className="text-[10px] bg-amber-500 text-slate-950 font-bold px-1.5 py-0.5 rounded-full shrink-0">
+              {isRtl ? 'عرض' : 'View'}
+            </span>
+          )}
+        </button>
+
+        {/* Remaining Invoices */}
+        <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-lg flex items-center gap-2.5">
+          <div className="p-2 bg-slate-800 text-slate-400 rounded-lg shrink-0">
+            <Clock className="w-5 h-5" />
+          </div>
+          <div>
+            <span className="text-[11px] text-slate-400 block font-medium">{isRtl ? 'فواتير متبقية' : 'Remaining Invoices'}</span>
+            <div className="text-base sm:text-lg font-black font-mono text-slate-200">
+              {Math.max(0, availableInvoices.length - completedInvoices.length)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 2. TOP SCANNER INPUT & WEDGE STATUS BAR */}
       <div className="bg-slate-900 border border-slate-700/80 rounded-xl p-3 sm:p-4 shadow-lg">
+        <div className="mb-3 px-3 py-1.5 rounded-lg bg-emerald-950/50 border border-emerald-800/40 text-xs font-semibold text-emerald-300 flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{t.randomScanBanner}</span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* View Incomplete Queue quick button */}
+            {incompleteInvoices.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setIsIncompleteDrawerOpen(true)}
+                className="flex items-center gap-1 px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-slate-950 text-[11px] font-black transition-all shadow-sm"
+              >
+                <PauseCircle className="w-3.5 h-3.5" />
+                <span>{isRtl ? `استكمال النواقص (${incompleteInvoices.length})` : `Resume Pending (${incompleteInvoices.length})`}</span>
+              </button>
+            )}
+
+            {/* Quick Camera QR Launcher badge */}
+            <button
+              type="button"
+              onClick={() => setIsCameraQrOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold transition-all shadow-sm"
+            >
+              <Camera className="w-3.5 h-3.5" />
+              <span>{isRtl ? 'كاميرا QR للفاتورة/الأوردر' : 'Camera QR for Invoice/Order'}</span>
+            </button>
+          </div>
+        </div>
+
         <form onSubmit={handleInputSubmit} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3">
           <div className="relative flex-1">
-            <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-emerald-400">
+            <div className={`absolute inset-y-0 ${isRtl ? 'right-0 pr-3.5' : 'left-0 pl-3.5'} flex items-center pointer-events-none text-emerald-400`}>
               <ScanLine className="w-5 h-5 animate-pulse" />
             </div>
             <input
@@ -387,49 +780,64 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
               onChange={(e) => setManualInput(e.target.value)}
               placeholder={
                 !activeSession 
-                  ? "Scan or enter Invoice Barcode (e.g. INV-2024-001)..." 
-                  : `Scan Item Barcode for ${activeSession.invoiceNo} (or scan new Invoice to switch)...`
+                  ? (isRtl ? 'امسح باركود الفاتورة أو الأوردر بالسكانر لبدء الجرد...' : 'Scan Invoice or Order barcode with scanner to start...')
+                  : (isRtl ? 'امسح باركود أي صنف عشوائياً بالسكانر...' : 'Scan ANY item barcode with scanner...')
               }
-              className="w-full pl-11 pr-4 py-3 bg-slate-950 text-white font-mono text-sm sm:text-base rounded-lg border-2 border-emerald-500/70 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-500/20 outline-none transition-all placeholder:text-slate-500"
+              className={`w-full ${isRtl ? 'pr-11 pl-4' : 'pl-11 pr-4'} py-3 bg-slate-950 text-white font-mono text-sm sm:text-base rounded-lg border-2 border-emerald-500/70 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-500/20 outline-none transition-all placeholder:text-slate-500`}
               autoFocus
               autoComplete="off"
               autoCapitalize="characters"
             />
           </div>
 
+          {/* Camera QR Button */}
+          <button
+            type="button"
+            onClick={() => setIsCameraQrOpen(true)}
+            className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-emerald-300 hover:text-emerald-200 border border-emerald-500/50 font-bold px-4 py-3 rounded-lg text-sm sm:text-base shadow transition-all whitespace-nowrap"
+            title={t.qrScannerBtn}
+          >
+            <QrCode className="w-4 h-4 text-emerald-400" />
+            <span className="hidden sm:inline">{isRtl ? 'مسح QR' : 'Camera QR'}</span>
+          </button>
+
+          {/* Action / Enter Button */}
           <button
             type="submit"
             className="flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold px-6 py-3 rounded-lg text-sm sm:text-base shadow transition-all whitespace-nowrap"
           >
             <Zap className="w-4 h-4" />
-            <span>{!activeSession ? 'Lock Invoice' : 'Scan Item'}</span>
+            <span>{!activeSession ? (isRtl ? 'قفل الفاتورة' : 'Lock Invoice') : (isRtl ? 'مسح الصنف' : 'Scan Item')}</span>
           </button>
         </form>
 
-        {/* Live Feedback Toast / Scan Notification */}
+        {/* Live Feedback Toast */}
         {recentScanFeedback && (
           <div className={`mt-2.5 px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-between gap-2 border animate-in fade-in slide-in-from-top-1 duration-150 ${
             recentScanFeedback.type === 'exact'
-              ? 'bg-emerald-950/80 border-emerald-600/80 text-emerald-200'
+              ? 'bg-emerald-950/90 border-emerald-600/80 text-emerald-200'
               : recentScanFeedback.type === 'mismatch'
                 ? 'bg-red-950/90 border-red-600/80 text-red-200'
                 : recentScanFeedback.type === 'surplus'
                   ? 'bg-amber-950/90 border-amber-600/80 text-amber-200'
-                  : 'bg-blue-950/80 border-blue-600/80 text-blue-200'
+                  : recentScanFeedback.type === 'blocked'
+                    ? 'bg-red-950/95 border-red-500 text-red-100 font-bold animate-pulse'
+                    : 'bg-blue-950/80 border-blue-600/80 text-blue-200'
           }`}>
             <div className="flex items-center gap-2 truncate">
               {recentScanFeedback.type === 'exact' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
-              {recentScanFeedback.type === 'mismatch' && <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 animate-bounce" />}
+              {recentScanFeedback.type === 'mismatch' && <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />}
               {recentScanFeedback.type === 'surplus' && <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />}
+              {recentScanFeedback.type === 'blocked' && <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />}
               {recentScanFeedback.type === 'match' && <CheckCircle2 className="w-4 h-4 text-blue-400 shrink-0" />}
               <span className="truncate">{recentScanFeedback.message}</span>
             </div>
-            <span className="font-mono text-[11px] opacity-75 shrink-0">Just now</span>
+            <span className="font-mono text-[11px] opacity-75 shrink-0">{isRtl ? 'الآن' : 'Just now'}</span>
           </div>
         )}
       </div>
 
-      {/* 2. NO ACTIVE INVOICE SCREEN (Step A Waiting) */}
+      {/* 3. NO ACTIVE INVOICE SCREEN (Waiting to scan / Lock Invoice) */}
       {!activeSession ? (
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 sm:p-8 text-center space-y-6 shadow-md">
           <div className="max-w-md mx-auto space-y-3">
@@ -437,334 +845,665 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
               <Lock className="w-8 h-8" />
             </div>
             <h2 className="text-xl font-bold text-white">
-              Step A: Scan Invoice Barcode to Begin Audit
+              {t.stepATitle}
             </h2>
             <p className="text-sm text-slate-400">
-              Point your handheld 1D barcode scanner at an invoice manifest barcode. The app will lock onto that invoice and prepare line items for verification.
+              {t.stepADesc}
             </p>
+
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => setIsCameraQrOpen(true)}
+                className="inline-flex items-center gap-2.5 px-5 py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-sm sm:text-base shadow-lg shadow-emerald-950/50 transition-all border border-emerald-400/40"
+              >
+                <Camera className="w-5 h-5 animate-pulse" />
+                <span>{isRtl ? 'مسح QR الفاتورة / الأوردر بالكاميرا' : 'Scan Invoice / Order QR Code with Camera'}</span>
+              </button>
+            </div>
           </div>
 
-          {/* Quick Invoice Picker from Daily Master Data */}
+          {/* Quick Picker & Pending Queue */}
           {availableInvoices.length > 0 ? (
-            <div className="max-w-2xl mx-auto space-y-3 pt-4 border-t border-slate-800 text-left">
+            <div className="max-w-4xl mx-auto space-y-4 pt-4 border-t border-slate-800 text-left">
               <div className="flex items-center justify-between text-xs text-slate-400">
-                <span className="font-semibold uppercase tracking-wider">
-                  Or Select from {availableInvoices.length} Loaded Master Invoices:
+                <span className="font-bold uppercase tracking-wider text-slate-300">
+                  {isRtl ? `قائمة فواتير اليوم (${availableInvoices.length}):` : `Today's Invoices Manifest (${availableInvoices.length}):`}
                 </span>
-                <span className="text-emerald-400 font-mono">100% Offline Ready</span>
+                <span className="text-emerald-400 font-mono">{completedInvoices.length} {isRtl ? 'مكتملة ومقفلة' : 'completed'}</span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {availableInvoices.map((inv) => (
-                  <button
-                    key={inv.invoiceNo}
-                    onClick={() => lockInvoiceSession(inv.invoiceNo)}
-                    className="flex items-center justify-between p-3 rounded-lg bg-slate-950/70 hover:bg-slate-800 border border-slate-800 hover:border-emerald-500/60 transition-all text-left group"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <FileText className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
-                      <div>
-                        <div className="font-mono font-bold text-sm text-white group-hover:text-emerald-300">
-                          {inv.invoiceNo}
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+                {availableInvoices.map((inv) => {
+                  const isCompleted = completedInvoices.some(c => c.invoiceNo.toLowerCase() === inv.invoiceNo.toLowerCase() || (inv.orderNo && c.orderNo?.toLowerCase() === inv.orderNo.toLowerCase()));
+                  const isIncomplete = incompleteInvoices.some(inc => inc.invoiceNo.toLowerCase() === inv.invoiceNo.toLowerCase() || (inv.orderNo && inc.orderNo?.toLowerCase() === inv.orderNo.toLowerCase()));
+
+                  return (
+                    <button
+                      key={inv.invoiceNo}
+                      onClick={() => lockInvoiceSession(inv.invoiceNo)}
+                      className={`flex items-center justify-between p-3 rounded-xl border transition-all text-left group ${
+                        isCompleted 
+                          ? 'bg-emerald-950/30 border-emerald-800/60 opacity-85 hover:opacity-100 hover:border-emerald-600'
+                          : isIncomplete
+                            ? 'bg-amber-950/40 border-amber-700 hover:border-amber-500 shadow-md shadow-amber-950/20'
+                            : 'bg-slate-950/70 hover:bg-slate-800 border-slate-800 hover:border-emerald-500/60'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className={`p-2 rounded-lg ${
+                          isCompleted ? 'bg-emerald-900/60 text-emerald-400' : isIncomplete ? 'bg-amber-900/60 text-amber-400' : 'bg-slate-800 text-slate-400'
+                        }`}>
+                          {isCompleted ? <CheckCheck className="w-4 h-4" /> : isIncomplete ? <PauseCircle className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
                         </div>
-                        <div className="text-xs text-slate-400">
-                          {inv.itemCount} Line Items &bull; {inv.totalQty} Total Qty
+                        <div>
+                          <div className="font-mono font-bold text-sm text-white group-hover:text-emerald-300 flex items-center gap-2">
+                            <span>{inv.invoiceNo}</span>
+                            {inv.orderNo && (
+                              <span className="text-[10px] bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-700/50 font-mono font-normal">
+                                {inv.orderNo}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-slate-400 mt-0.5">
+                            {inv.itemCount} {isRtl ? 'أصناف' : 'items'} &bull; <strong className="text-slate-300">{inv.totalQty} {isRtl ? 'قطعة' : 'qty'}</strong>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition-colors" />
-                  </button>
-                ))}
+
+                      <div className="flex items-center gap-1.5">
+                        {isCompleted && (
+                          <span className="text-[10px] font-bold bg-emerald-950 text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-700">
+                            {isRtl ? 'مكتملة' : 'Done'}
+                          </span>
+                        )}
+                        {isIncomplete && (
+                          <span className="text-[10px] font-bold bg-amber-950 text-amber-300 px-2 py-0.5 rounded-full border border-amber-700">
+                            {isRtl ? 'استكمال' : 'Resume'}
+                          </span>
+                        )}
+                        <ArrowRight className={`w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition-colors ${isRtl ? 'rotate-180' : ''}`} />
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           ) : (
             <div className="bg-slate-950/60 border border-slate-800 rounded-lg p-5 max-w-md mx-auto text-xs text-slate-400 space-y-3">
-              <p>No master invoice data loaded yet for today.</p>
+              <p>{isRtl ? 'لا توجد بيانات فواتير محملة لليوم.' : 'No master invoice data loaded yet for today.'}</p>
               <button
                 onClick={onOpenSyncModal}
                 className="inline-flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-4 py-2 rounded-lg text-xs transition-colors"
               >
                 <Sparkles className="w-4 h-4" />
-                <span>Import Daily Excel / CSV File</span>
+                <span>{t.updateExcel}</span>
               </button>
             </div>
           )}
         </div>
       ) : (
-        /* 3. ACTIVE INVOICE SESSION DASHBOARD (Step B Active Scanning) */
+        /* 4. ACTIVE INVOICE SESSION DASHBOARD */
         <div className="space-y-4">
           {/* Active Session Header Card */}
-          <div className="bg-slate-900 border-2 border-emerald-500/40 rounded-xl p-4 sm:p-5 shadow-lg space-y-4">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-3">
-                <div className="p-3 bg-emerald-950/80 border border-emerald-600/50 rounded-xl text-emerald-400 shadow-inner">
-                  <Package className="w-6 h-6" />
+          <div className="bg-slate-900 border-2 border-emerald-500/50 rounded-2xl p-4 sm:p-6 shadow-xl space-y-5">
+            {/* Top Row: Title + Finish Action Buttons */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-3.5">
+                <div className="p-3.5 bg-emerald-950 border border-emerald-600/60 rounded-2xl text-emerald-400 shadow-inner">
+                  <Package className="w-7 h-7" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800/40">
-                      Active Audit Session
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold uppercase tracking-wider text-emerald-300 bg-emerald-950 px-2.5 py-0.5 rounded-full border border-emerald-700/60">
+                      {t.activeInvoice}
                     </span>
+                    {activeSession.orderNo && (
+                      <span className="text-xs font-bold bg-indigo-950 text-indigo-300 px-2.5 py-0.5 rounded-full border border-indigo-700/60 font-mono flex items-center gap-1">
+                        <Hash className="w-3.5 h-3.5" />
+                        <span>{t.orderNumberLabel} {activeSession.orderNo}</span>
+                      </span>
+                    )}
                     <span className="text-xs text-slate-400 font-mono">
-                      Started: {new Date(activeSession.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {new Date(activeSession.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </span>
                   </div>
-                  <h2 className="text-xl sm:text-2xl font-black font-mono text-white tracking-tight mt-0.5">
+                  <h2 className="text-2xl sm:text-3xl font-black font-mono text-white tracking-tight mt-1">
                     {activeSession.invoiceNo}
                   </h2>
                 </div>
               </div>
 
-              {/* Complete / Switch Invoice Button */}
-              <button
-                id="complete-switch-invoice-btn"
-                onClick={() => completeAndSwitchInvoice()}
-                className="flex items-center gap-2 bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white font-bold px-4 py-2.5 rounded-lg text-xs sm:text-sm shadow-md transition-all border border-amber-500/50"
-              >
-                <Unlock className="w-4 h-4" />
-                <span>Close & Evaluate Invoice</span>
-              </button>
+              {/* Action Finish / Defer Buttons */}
+              <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+                {/* 1. If 100% Match: Prominent Finish & Lock Button */}
+                {isInvoice100PercentComplete ? (
+                  <button
+                    onClick={() => handleFinalizeInvoice(true)}
+                    className="flex items-center gap-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:from-emerald-700 active:to-teal-700 text-white font-black px-5 py-3 rounded-xl text-sm shadow-lg shadow-emerald-950/60 transition-all border border-emerald-400/50 animate-pulse"
+                  >
+                    <CheckCheck className="w-5 h-5" />
+                    <span>{isRtl ? 'إنهاء وقفل الفاتورة (مكتملة 100%)' : 'Complete & Lock Invoice (100%)'}</span>
+                  </button>
+                ) : (
+                  <>
+                    {/* 2. Defer as Incomplete & Resume Later */}
+                    <button
+                      onClick={handleDeferAsIncomplete}
+                      className="flex items-center gap-2 bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-slate-950 font-black px-4 py-2.5 rounded-xl text-xs sm:text-sm shadow-md transition-all border border-amber-400/50"
+                      title={isRtl ? 'حفظ الأصناف الممسوحة وترحيل الفاتورة للاستكمال لاحقاً' : 'Save scanned items & defer for later completion'}
+                    >
+                      <PauseCircle className="w-4 h-4" />
+                      <span>{isRtl ? 'ترحيل للاستكمال لاحقاً (ناقصة)' : 'Defer as Incomplete'}</span>
+                    </button>
+
+                    {/* 3. Finalize with Error Report */}
+                    <button
+                      onClick={() => handleFinalizeInvoice(false)}
+                      className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 active:bg-slate-900 text-slate-200 font-bold px-4 py-2.5 rounded-xl text-xs sm:text-sm shadow transition-all border border-slate-700"
+                    >
+                      <Archive className="w-4 h-4 text-amber-400" />
+                      <span>{isRtl ? 'إنهاء وتسجيل النواقص' : 'Finish & Record Errors'}</span>
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
 
-            {/* Metrics & Progress Bar */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 text-xs">
-              <div className="bg-slate-950/80 border border-slate-800 p-2.5 rounded-lg">
-                <span className="text-slate-400 block text-[11px]">Total Line Items</span>
-                <span className="text-lg font-bold font-mono text-white">{totalItemsRequired}</span>
-              </div>
-              <div className="bg-emerald-950/50 border border-emerald-800/50 p-2.5 rounded-lg">
-                <span className="text-emerald-400 block text-[11px]">Exact Matches (Clean)</span>
-                <span className="text-lg font-bold font-mono text-emerald-300">{exactCount}</span>
-              </div>
-              <div className="bg-amber-950/50 border border-amber-800/50 p-2.5 rounded-lg">
-                <span className="text-amber-400 block text-[11px]">Pending / Shortages</span>
-                <span className="text-lg font-bold font-mono text-amber-300">{shortageCount}</span>
-              </div>
-              <div className={`p-2.5 rounded-lg border ${
-                mismatchCount > 0 || surplusCount > 0 
-                  ? 'bg-red-950/60 border-red-800/60 text-red-300' 
-                  : 'bg-slate-950/80 border-slate-800 text-slate-400'
-              }`}>
-                <span className="block text-[11px]">Mismatches / Surplus</span>
-                <span className="text-lg font-bold font-mono">{mismatchCount + surplusCount}</span>
-              </div>
-            </div>
+            {/* 🌟 PROMINENT TOTAL INVOICE QUANTITY & ITEM COUNT CARDS (Requirement 4) */}
+            <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-4 shadow-inner">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                {/* Total Invoice Quantity (الكمية الإجمالية للفاتورة) */}
+                <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+                  <span className="text-slate-400 block text-xs font-semibold mb-1">
+                    {isRtl ? 'إجمالي كمية الفاتورة (مطلوب)' : 'Total Invoice Quantity (Req)'}
+                  </span>
+                  <div className="text-2xl sm:text-3xl font-black font-mono text-emerald-400">
+                    {totalRequiredQuantity} <span className="text-xs text-slate-400 font-normal">{isRtl ? 'قطعة' : 'units'}</span>
+                  </div>
+                </div>
 
-            {/* Audit Progress Bar */}
-            <div className="space-y-1.5">
-              <div className="flex justify-between text-xs font-semibold">
-                <span className="text-slate-300">Invoice Audit Completion</span>
-                <span className="text-emerald-400 font-mono">{progressPercent}% ({exactCount}/{totalItemsRequired} items exact)</span>
+                {/* Scanned Actual Quantity (الكمية الممسوحة فعلياً) */}
+                <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+                  <span className="text-slate-400 block text-xs font-semibold mb-1">
+                    {isRtl ? 'الكمية الممسوحة فعلياً' : 'Total Scanned Quantity'}
+                  </span>
+                  <div className={`text-2xl sm:text-3xl font-black font-mono ${
+                    totalScannedQuantity === totalRequiredQuantity 
+                      ? 'text-emerald-300' 
+                      : totalScannedQuantity < totalRequiredQuantity 
+                        ? 'text-amber-400' 
+                        : 'text-purple-400'
+                  }`}>
+                    {totalScannedQuantity} <span className="text-xs text-slate-400 font-normal">/ {totalRequiredQuantity}</span>
+                  </div>
+                </div>
+
+                {/* Total Line Items Count (عدد الأصناف / السطور) */}
+                <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+                  <span className="text-slate-400 block text-xs font-semibold mb-1">
+                    {isRtl ? 'عدد الأصناف (السطور)' : 'Line Items Count'}
+                  </span>
+                  <div className="text-2xl sm:text-3xl font-black font-mono text-cyan-400">
+                    {totalItemsRequired} <span className="text-xs text-slate-400 font-normal">{isRtl ? 'صنف' : 'items'}</span>
+                  </div>
+                </div>
+
+                {/* Exact Matches Count (الأصناف المكتملة) */}
+                <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+                  <span className="text-slate-400 block text-xs font-semibold mb-1">
+                    {isRtl ? 'أصناف مكتملة مطابقة' : 'Exact Matched Items'}
+                  </span>
+                  <div className="text-2xl sm:text-3xl font-black font-mono text-emerald-300">
+                    {exactCount} <span className="text-xs text-slate-400 font-normal">/ {totalItemsRequired}</span>
+                  </div>
+                </div>
               </div>
-              <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800">
-                <div 
-                  className={`h-full transition-all duration-300 ${
-                    progressPercent === 100 ? 'bg-emerald-500' : 'bg-gradient-to-r from-emerald-600 to-emerald-400'
-                  }`}
-                  style={{ width: `${Math.min(100, progressPercent)}%` }}
-                />
+
+              {/* Progress Bar & Status Pill */}
+              <div className="mt-4 pt-3 border-t border-slate-800/80 space-y-2">
+                <div className="flex justify-between items-center text-xs font-bold">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-300">{isRtl ? 'نسبة اكتمال فحص الفاتورة:' : 'Audit Completion:'}</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[11px] font-black ${
+                      isInvoice100PercentComplete 
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' 
+                        : shortageCount > 0 
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' 
+                          : 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                    }`}>
+                      {isInvoice100PercentComplete 
+                        ? (isRtl ? 'جاهزة للإقفال (مكتملة 100%)' : 'Ready to Close (100%)')
+                        : shortageCount > 0 
+                          ? (isRtl ? `يوجد نواقص (${totalRequiredQuantity - totalScannedQuantity} قطعة)` : `Has Shortages (${totalRequiredQuantity - totalScannedQuantity} units)`)
+                          : (isRtl ? 'يوجد زيادات' : 'Has Surplus')}
+                    </span>
+                  </div>
+                  <span className="text-emerald-400 font-mono text-sm">{progressPercent}%</span>
+                </div>
+                <div className="w-full bg-slate-900 rounded-full h-3.5 overflow-hidden border border-slate-800">
+                  <div 
+                    className={`h-full transition-all duration-300 ${
+                      progressPercent === 100 ? 'bg-emerald-500' : 'bg-gradient-to-r from-emerald-600 to-emerald-400'
+                    }`}
+                    style={{ width: `${Math.min(100, progressPercent)}%` }}
+                  />
+                </div>
               </div>
             </div>
           </div>
 
-          {/* 4. SCANNED ITEMS AUDIT TABLE & REAL-TIME STATUS BADGES */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
-            {/* Filter Tabs */}
-            <div className="px-4 py-2.5 bg-slate-950/90 border-b border-slate-800 flex items-center justify-between gap-2 overflow-x-auto">
-              <div className="flex items-center gap-1.5 text-xs font-semibold">
+          {/* 🌟 SPOTLIGHT FOCUS CARD: LAST SCANNED ITEM */}
+          {lastScannedItem && (
+            <div className="bg-slate-900 border-2 border-emerald-400/80 rounded-xl p-4 shadow-xl animate-in zoom-in-95 duration-150">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className={`p-3 rounded-xl font-bold flex items-center justify-center ${
+                    lastScannedItem.codeStatus === 'MISMATCH' 
+                      ? 'bg-red-950 border border-red-600 text-red-400 animate-pulse' 
+                      : lastScannedItem.qtyStatus === 'EXACT' 
+                        ? 'bg-emerald-950 border border-emerald-500 text-emerald-400' 
+                        : lastScannedItem.qtyStatus === 'SURPLUS'
+                          ? 'bg-amber-950 border border-amber-500 text-amber-400'
+                          : 'bg-blue-950 border border-blue-500 text-blue-400'
+                  }`}>
+                    <ScanLine className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider bg-slate-800 text-slate-300 px-2 py-0.5 rounded">
+                        {t.lastScannedTitle}
+                      </span>
+                      <span className="text-xs text-slate-400 font-mono">
+                        {new Date(lastScannedItem.lastScannedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                      </span>
+                    </div>
+                    <div className="text-lg font-black font-mono text-emerald-300 mt-0.5 flex items-center gap-2">
+                      <span>{lastScannedItem.itemCode}</span>
+                      {lastScannedItem.orderNo && (
+                        <span className="text-xs bg-indigo-950 text-indigo-300 px-2 py-0.5 rounded border border-indigo-700/50 font-normal">
+                          {lastScannedItem.orderNo}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-slate-300 font-medium truncate max-w-md">
+                      {lastScannedItem.itemName}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Big Count & Quick Adjust Actions */}
+                <div className="flex items-center gap-3 self-end sm:self-auto">
+                  <div className="text-center bg-slate-950 px-4 py-2 rounded-xl border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block uppercase font-mono">{t.scannedCount} / {t.requiredTarget}</span>
+                    <div className="text-2xl font-black font-mono text-white">
+                      <span className={lastScannedItem.qtyStatus === 'EXACT' ? 'text-emerald-400' : lastScannedItem.qtyStatus === 'SURPLUS' ? 'text-amber-400' : 'text-blue-400'}>
+                        {lastScannedItem.actualQty}
+                      </span>
+                      <span className="text-sm text-slate-400 font-normal"> / {lastScannedItem.requiredQty} {lastScannedItem.unit}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-1">
+                    {lastScannedItem.codeStatus === 'MISMATCH' ? (
+                      <span className="px-3 py-1 rounded-full text-xs font-black bg-red-950 text-red-400 border border-red-700">
+                        {t.statusMismatch}
+                      </span>
+                    ) : lastScannedItem.qtyStatus === 'EXACT' ? (
+                      <span className="px-3 py-1 rounded-full text-xs font-black bg-emerald-950 text-emerald-400 border border-emerald-600">
+                        {t.statusExact}
+                      </span>
+                    ) : lastScannedItem.qtyStatus === 'SHORTAGE' ? (
+                      <span className="px-3 py-1 rounded-full text-xs font-black bg-amber-950 text-amber-400 border border-amber-700">
+                        {isRtl ? `متبقي (${lastScannedItem.requiredQty - lastScannedItem.actualQty})` : `Remaining (${lastScannedItem.requiredQty - lastScannedItem.actualQty})`}
+                      </span>
+                    ) : (
+                      <span className="px-3 py-1 rounded-full text-xs font-black bg-purple-950 text-purple-400 border border-purple-700">
+                        {isRtl ? `زيادة (+${lastScannedItem.actualQty - lastScannedItem.requiredQty})` : `Surplus (+${lastScannedItem.actualQty - lastScannedItem.requiredQty})`}
+                      </span>
+                    )}
+
+                    <div className="inline-flex items-center justify-end gap-1">
+                      <button
+                        onClick={() => adjustItemQuantity(lastScannedItem.itemCode, -1)}
+                        disabled={lastScannedItem.actualQty === 0}
+                        className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded disabled:opacity-30"
+                        title="-1"
+                      >
+                        <Minus className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => adjustItemQuantity(lastScannedItem.itemCode, 1)}
+                        className="p-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded"
+                        title="+1"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 5. ITEM TABS & SORT CONTROLS */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-3 sm:p-4 shadow">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-1 sm:gap-2 overflow-x-auto">
                 <button
                   onClick={() => setActiveTabFilter('ALL')}
-                  className={`px-3 py-1 rounded-md transition-colors ${
-                    activeTabFilter === 'ALL' ? 'bg-slate-700 text-white' : 'text-slate-400 hover:text-white'
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap ${
+                    activeTabFilter === 'ALL' ? 'bg-slate-800 text-white border border-slate-700' : 'text-slate-400 hover:bg-slate-800/50'
                   }`}
                 >
-                  All Items ({itemsList.length})
+                  {t.allTab} ({itemsList.length})
                 </button>
                 <button
                   onClick={() => setActiveTabFilter('PENDING')}
-                  className={`px-3 py-1 rounded-md transition-colors ${
-                    activeTabFilter === 'PENDING' ? 'bg-amber-900/80 text-amber-200' : 'text-slate-400 hover:text-white'
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap ${
+                    activeTabFilter === 'PENDING' ? 'bg-amber-950 text-amber-300 border border-amber-800' : 'text-slate-400 hover:bg-slate-800/50'
                   }`}
                 >
-                  Pending ({shortageCount})
+                  {t.pendingTab} ({shortageCount})
                 </button>
                 <button
                   onClick={() => setActiveTabFilter('EXACT')}
-                  className={`px-3 py-1 rounded-md transition-colors ${
-                    activeTabFilter === 'EXACT' ? 'bg-emerald-900/80 text-emerald-200' : 'text-slate-400 hover:text-white'
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap ${
+                    activeTabFilter === 'EXACT' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'text-slate-400 hover:bg-slate-800/50'
                   }`}
                 >
-                  Exact ({exactCount})
+                  {t.exactTab} ({exactCount})
                 </button>
-                {(mismatchCount > 0 || surplusCount > 0) && (
-                  <button
-                    onClick={() => setActiveTabFilter('DISCREPANCIES')}
-                    className={`px-3 py-1 rounded-md transition-colors ${
-                      activeTabFilter === 'DISCREPANCIES' ? 'bg-red-900/80 text-red-200' : 'text-red-400 hover:text-red-300'
-                    }`}
-                  >
-                    Errors ({mismatchCount + surplusCount})
-                  </button>
-                )}
+                <button
+                  onClick={() => setActiveTabFilter('DISCREPANCIES')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap ${
+                    activeTabFilter === 'DISCREPANCIES' ? 'bg-red-950 text-red-300 border border-red-800' : 'text-slate-400 hover:bg-slate-800/50'
+                  }`}
+                >
+                  {t.discrepanciesTab} ({mismatchCount + surplusCount})
+                </button>
               </div>
 
-              <span className="text-[11px] text-slate-400 hidden sm:inline">
-                Automatic scan increments enabled
-              </span>
+              {/* Sorting Mode Selector */}
+              <div className="flex items-center gap-1.5 text-xs text-slate-400 self-end sm:self-auto">
+                <ArrowUpDown className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="hidden sm:inline">{isRtl ? 'الترتيب:' : 'Sort:'}</span>
+                <select
+                  value={settings.itemSortMode || 'LAST_SCANNED'}
+                  onChange={(e) => onUpdateSettings({ ...settings, itemSortMode: e.target.value as any })}
+                  className="bg-slate-950 text-slate-200 border border-slate-700 rounded px-2 py-1 text-xs font-semibold focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="LAST_SCANNED">{isRtl ? 'آخر ما تم مسحه (الأحدث أولاً)' : 'Last Scanned First'}</option>
+                  <option value="PENDING_FIRST">{isRtl ? 'النواقص أولاً' : 'Pending First'}</option>
+                  <option value="ORIGINAL_ORDER">{isRtl ? 'ترتيب ملف الإكسيل' : 'Excel Order'}</option>
+                  <option value="ERRORS_FIRST">{isRtl ? 'الأخطاء أولاً' : 'Errors First'}</option>
+                </select>
+              </div>
             </div>
 
-            {/* Table */}
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse font-sans text-xs sm:text-sm">
-                <thead className="bg-slate-950 text-slate-400 font-mono text-[11px] border-b border-slate-800 uppercase tracking-wider">
-                  <tr>
-                    <th className="p-3 pl-4">Item Code & Name</th>
-                    <th className="p-3 text-center">Unit</th>
-                    <th className="p-3 text-center">Req</th>
-                    <th className="p-3 text-center">Actual (Scan Count)</th>
-                    <th className="p-3 text-center">Code Status</th>
-                    <th className="p-3 text-center">Qty Status</th>
-                    <th className="p-3 pr-4 text-right">Adjust Qty</th>
+            {/* Items Table */}
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-xs text-slate-200 font-mono">
+                <thead>
+                  <tr className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[11px] uppercase">
+                    <th className="py-2.5 px-3 text-start">#</th>
+                    <th className="py-2.5 px-3 text-start">{t.thBarcode}</th>
+                    <th className="py-2.5 px-3 text-start">{t.thItemName}</th>
+                    <th className="py-2.5 px-3 text-center">{t.thRequired}</th>
+                    <th className="py-2.5 px-3 text-center">{t.thActual}</th>
+                    <th className="py-2.5 px-3 text-center">{t.thDiff}</th>
+                    <th className="py-2.5 px-3 text-center">{t.thStatus}</th>
+                    <th className="py-2.5 px-3 text-end">{isRtl ? 'تعديل' : 'Adjust'}</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-800/80 text-slate-200 font-mono">
-                  {filteredItems.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="p-8 text-center text-slate-500 font-sans">
-                        No items match the selected filter.
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredItems.map((item) => {
-                      const isMatch = item.codeStatus === 'MATCH';
-                      const isExact = item.qtyStatus === 'EXACT';
-                      const isShortage = item.qtyStatus === 'SHORTAGE';
-                      const isSurplus = item.qtyStatus === 'SURPLUS';
-                      const isMismatch = item.codeStatus === 'MISMATCH';
+                <tbody className="divide-y divide-slate-800/60">
+                  {sortedAndFilteredItems.map((item, idx) => {
+                    const diff = item.actualQty - item.requiredQty;
+                    const isLastScanned = activeSession.lastScannedItemCode === item.itemCode;
 
-                      return (
-                        <tr 
-                          key={item.itemCode}
-                          className={`transition-colors ${
-                            isMismatch 
-                              ? 'bg-red-950/30 hover:bg-red-950/50' 
-                              : isExact 
-                                ? 'bg-emerald-950/20 hover:bg-emerald-950/40' 
-                                : isSurplus 
-                                  ? 'bg-amber-950/30 hover:bg-amber-950/50' 
-                                  : 'hover:bg-slate-800/40'
-                          }`}
-                        >
-                          {/* Item Code & Name */}
-                          <td className="p-3 pl-4">
-                            <div className="font-bold text-white flex items-center gap-1.5">
-                              <ScanLine className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                              <span className="font-mono text-emerald-300">{item.itemCode}</span>
-                            </div>
-                            <div className="text-xs text-slate-400 font-sans truncate max-w-xs sm:max-w-sm mt-0.5">
-                              {item.itemName}
-                            </div>
-                          </td>
-
-                          {/* Unit */}
-                          <td className="p-3 text-center text-slate-300">
-                            {item.unit}
-                          </td>
-
-                          {/* Required Qty */}
-                          <td className="p-3 text-center font-bold text-slate-200">
-                            {item.requiredQty}
-                          </td>
-
-                          {/* Actual Scanned Qty with Visual Indicator */}
-                          <td className="p-3 text-center">
-                            <span className={`inline-block px-3 py-1 rounded-md font-extrabold text-base ${
-                              isExact 
-                                ? 'bg-emerald-600 text-white shadow-sm' 
-                                : isSurplus 
-                                  ? 'bg-amber-600 text-white' 
-                                  : item.actualQty > 0 
-                                    ? 'bg-blue-600 text-white' 
-                                    : 'bg-slate-800 text-slate-400'
-                            }`}>
-                              {item.actualQty}
+                    return (
+                      <tr 
+                        key={item.itemCode}
+                        className={`transition-colors ${
+                          isLastScanned 
+                            ? 'bg-emerald-950/40 font-semibold' 
+                            : item.codeStatus === 'MISMATCH' 
+                              ? 'bg-red-950/30' 
+                              : item.qtyStatus === 'SURPLUS'
+                                ? 'bg-amber-950/20'
+                                : 'hover:bg-slate-800/40'
+                        }`}
+                      >
+                        <td className="py-2.5 px-3 text-slate-400 text-start">{idx + 1}</td>
+                        <td className="py-2.5 px-3 text-start font-bold text-white">
+                          <span>{item.itemCode}</span>
+                          {item.orderNo && (
+                            <span className="block text-[10px] text-indigo-400 font-normal">
+                              {item.orderNo}
                             </span>
-                          </td>
-
-                          {/* Code_Status Badge */}
-                          <td className="p-3 text-center">
-                            {isMatch ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800">
-                                <CheckCircle2 className="w-3 h-3" />
-                                MATCH
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-red-950 text-red-400 border border-red-700 animate-pulse">
-                                <AlertTriangle className="w-3 h-3" />
-                                MISMATCH
-                              </span>
-                            )}
-                          </td>
-
-                          {/* Qty_Status Badge */}
-                          <td className="p-3 text-center">
-                            {isExact && (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800">
-                                <CheckCircle2 className="w-3 h-3" />
-                                EXACT
-                              </span>
-                            )}
-                            {isShortage && (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-950 text-amber-400 border border-amber-800">
-                                SHORTAGE ({item.requiredQty - item.actualQty})
-                              </span>
-                            )}
-                            {isSurplus && (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-red-950 text-red-400 border border-red-800">
-                                SURPLUS (+{item.actualQty - item.requiredQty})
-                              </span>
-                            )}
-                          </td>
-
-                          {/* Manual +/- Controls */}
-                          <td className="p-3 pr-4 text-right">
-                            <div className="inline-flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
-                              <button
-                                onClick={() => adjustItemQuantity(item.itemCode, -1)}
-                                disabled={item.actualQty === 0}
-                                title="Decrease Qty"
-                                className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30 disabled:hover:bg-transparent"
-                              >
-                                <Minus className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                onClick={() => adjustItemQuantity(item.itemCode, 1)}
-                                title="Increase Qty"
-                                className="p-1 rounded text-emerald-400 hover:text-emerald-300 hover:bg-slate-800"
-                              >
-                                <Plus className="w-3.5 h-3.5" />
-                              </button>
-                              {item.actualQty > 0 && (
-                                <button
-                                  onClick={() => adjustItemQuantity(item.itemCode, -item.actualQty)}
-                                  title="Reset Count to 0"
-                                  className="p-1 rounded text-red-400 hover:text-red-300 hover:bg-slate-800"
-                                >
-                                  <RotateCcw className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-start text-slate-300 font-sans truncate max-w-xs">{item.itemName}</td>
+                        <td className="py-2.5 px-3 text-center text-slate-400">{item.requiredQty} {item.unit}</td>
+                        <td className="py-2.5 px-3 text-center font-bold text-white">
+                          <span className={item.qtyStatus === 'EXACT' ? 'text-emerald-400' : item.qtyStatus === 'SURPLUS' ? 'text-amber-400' : 'text-blue-400'}>
+                            {item.actualQty}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-center font-bold">
+                          {diff === 0 ? (
+                            <span className="text-emerald-400">0</span>
+                          ) : diff < 0 ? (
+                            <span className="text-amber-400">{diff}</span>
+                          ) : (
+                            <span className="text-purple-400">+{diff}</span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-center">
+                          {item.codeStatus === 'MISMATCH' ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-950 text-red-400 border border-red-800">
+                              {t.statusMismatch}
+                            </span>
+                          ) : item.qtyStatus === 'EXACT' ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800">
+                              {t.statusExact}
+                            </span>
+                          ) : item.qtyStatus === 'SHORTAGE' ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-400 border border-amber-800">
+                              {isRtl ? 'نقص' : 'SHORTAGE'}
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-950 text-purple-400 border border-purple-800">
+                              {isRtl ? 'زيادة' : 'SURPLUS'}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-end">
+                          <div className="inline-flex items-center gap-1 justify-end">
+                            <button
+                              onClick={() => adjustItemQuantity(item.itemCode, -1)}
+                              disabled={item.actualQty === 0}
+                              className="p-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded disabled:opacity-30"
+                              title="-1"
+                            >
+                              <Minus className="w-3 h-3" />
+                            </button>
+                            <button
+                              onClick={() => adjustItemQuantity(item.itemCode, 1)}
+                              className="p-1 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded"
+                              title="+1"
+                            >
+                              <Plus className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           </div>
         </div>
       )}
+
+      {/* 🌟 6. BLOCKED COMPLETED INVOICE WARNING MODAL (Requirement 2) */}
+      {blockedInvoiceWarning && (
+        <div className={`fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 ${isRtl ? 'rtl text-right' : 'ltr text-left'}`} dir={isRtl ? 'rtl' : 'ltr'}>
+          <div className="bg-slate-900 border-2 border-red-500 rounded-2xl p-6 shadow-2xl max-w-lg w-full text-slate-100 animate-in zoom-in-95 duration-150 space-y-4">
+            <div className="flex items-center gap-3 text-red-400">
+              <div className="p-3 bg-red-950 border border-red-700 rounded-xl">
+                <ShieldAlert className="w-7 h-7 animate-bounce" />
+              </div>
+              <div>
+                <h3 className="text-lg font-black text-white">
+                  {isRtl ? 'تحذير: الفاتورة مكتملة ومقفلة مسبقاً!' : 'Warning: Invoice Already Completed & Closed!'}
+                </h3>
+                <p className="text-xs text-red-300 font-mono">
+                  {isRtl ? 'رقم الفاتورة:' : 'Invoice No:'} <strong className="text-white">{blockedInvoiceWarning.invoiceNo}</strong>
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs space-y-2 font-mono">
+              <div className="flex justify-between">
+                <span className="text-slate-400">{isRtl ? 'تاريخ ووقت الاكتمال:' : 'Completed At:'}</span>
+                <span className="text-white font-bold">{new Date(blockedInvoiceWarning.completedRecord.completedAt).toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">{isRtl ? 'إجمالي الكمية المدققة:' : 'Audited Total Qty:'}</span>
+                <span className="text-emerald-400 font-bold">{blockedInvoiceWarning.completedRecord.totalQty} {isRtl ? 'قطعة' : 'units'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">{isRtl ? 'عدد الأصناف:' : 'Line Items:'}</span>
+                <span className="text-white font-bold">{blockedInvoiceWarning.completedRecord.totalItems} {isRtl ? 'صنف' : 'items'}</span>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              {isRtl 
+                ? 'تم قفل الفاتورة تلقائياً لمنع تكرار مسحها أو إدخال بضاعة مضاعفة. إذا كنت ترغب في إعادة فحصها يرجى الضغط على زر إعادة الفتح أدناه.'
+                : 'This invoice was locked automatically to prevent accidental duplicate scanning. You can force reopen it below if required.'}
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => setBlockedInvoiceWarning(null)}
+                className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs transition-colors"
+              >
+                {isRtl ? 'إلغاء وإغلاق' : 'Dismiss'}
+              </button>
+              <button
+                onClick={() => handleReopenInvoice(blockedInvoiceWarning.invoiceNo)}
+                className="px-4 py-2.5 bg-amber-600 hover:bg-amber-500 text-slate-950 font-black rounded-xl text-xs transition-colors"
+              >
+                {isRtl ? '🔓 إعادة فتح اضطراري للمراجعة' : '🔓 Force Reopen for Re-Audit'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🌟 7. INCOMPLETE INVOICES DRAWER (Requirement 3: الفواتير الناقصة والمرحلة) */}
+      {isIncompleteDrawerOpen && (
+        <div className={`fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 ${isRtl ? 'rtl text-right' : 'ltr text-left'}`} dir={isRtl ? 'rtl' : 'ltr'}>
+          <div className="bg-slate-900 border-2 border-amber-600/70 rounded-2xl shadow-2xl max-w-2xl w-full text-slate-100 animate-in zoom-in-95 duration-150 overflow-hidden flex flex-col max-h-[85vh]">
+            <div className="px-5 py-4 border-b border-slate-800 bg-slate-950 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-amber-950 text-amber-400 rounded-xl border border-amber-700/50">
+                  <PauseCircle className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base sm:text-lg font-black text-white">
+                    {isRtl ? 'قائمة الفواتير الناقصة والمرحلة للاستكمال' : 'Incomplete Invoices Queue'}
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    {isRtl ? 'فواتير تم حفظ ما تم مسحه منها وجاهزة لمتابعة فحص النواقص' : 'Invoices with saved partial scans ready to resume'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsIncompleteDrawerOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-3 flex-1">
+              {incompleteInvoices.length === 0 ? (
+                <div className="text-center py-8 text-slate-400 text-xs">
+                  {isRtl ? 'لا توجد فواتير ناقصة أو مرحلة حالياً.' : 'No incomplete invoices currently in queue.'}
+                </div>
+              ) : (
+                incompleteInvoices.map((inc) => (
+                  <div
+                    key={inc.invoiceNo}
+                    className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-amber-500/60 transition-all"
+                  >
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-base font-black font-mono text-white">{inc.invoiceNo}</span>
+                        {inc.orderNo && (
+                          <span className="text-[10px] bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-700 font-mono">
+                            {inc.orderNo}
+                          </span>
+                        )}
+                        <span className="text-[11px] text-slate-400 font-mono">
+                          {new Date(inc.savedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-300 mt-1 flex items-center gap-3">
+                        <span>{isRtl ? 'المطابق:' : 'Completed:'} <strong className="text-emerald-400">{inc.completedItemsCount}/{inc.totalItemsCount} {isRtl ? 'صنف' : 'items'}</strong></span>
+                        <span>&bull;</span>
+                        <span>{isRtl ? 'النواقص المتبقية:' : 'Missing:'} <strong className="text-amber-400">{inc.missingQty} {isRtl ? 'قطعة' : 'units'}</strong></span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 self-end sm:self-auto">
+                      <button
+                        onClick={async () => {
+                          setIsIncompleteDrawerOpen(false);
+                          await lockInvoiceSession(inc.invoiceNo);
+                        }}
+                        className="flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-slate-950 font-black px-4 py-2 rounded-xl text-xs shadow transition-all"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                        <span>{isRtl ? 'استكمال المسح الآن' : 'Resume Audit'}</span>
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="px-5 py-3 bg-slate-950 border-t border-slate-800 text-end">
+              <button
+                onClick={() => setIsIncompleteDrawerOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-lg"
+              >
+                {isRtl ? 'إغلاق' : 'Close'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Camera QR Modal */}
+      <CameraQrScannerModal
+        isOpen={isCameraQrOpen}
+        onClose={() => setIsCameraQrOpen(false)}
+        onScanSuccess={async (scannedCode) => {
+          setIsCameraQrOpen(false);
+          if (!activeSession) {
+            await lockInvoiceSession(scannedCode);
+          } else {
+            await handleItemScan(scannedCode);
+          }
+        }}
+        expectedType={!activeSession ? 'INVOICE_OR_ORDER' : 'ITEM_OR_INVOICE'}
+        activeInvoiceNo={activeSession?.invoiceNo}
+      />
     </div>
   );
 };

@@ -155,6 +155,67 @@ export const SoundEffects = {
     }
   },
 
+  // Alert when attempting to scan an already completed and closed invoice
+  playAlreadyCompletedBlocked(volume = 0.8) {
+    try {
+      const ctx = getAudioContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      
+      // Tone 1: Low sharp buzz
+      const osc1 = ctx.createOscillator();
+      const gain1 = ctx.createGain();
+      osc1.type = 'sawtooth';
+      osc1.frequency.setValueAtTime(150, now);
+      gain1.gain.setValueAtTime(volume * 0.6, now);
+      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+      osc1.connect(gain1);
+      gain1.connect(ctx.destination);
+      osc1.start(now);
+      osc1.stop(now + 0.2);
+
+      // Tone 2: Lower follow-up buzz
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.type = 'sawtooth';
+      osc2.frequency.setValueAtTime(110, now + 0.15);
+      gain2.gain.setValueAtTime(volume * 0.6, now + 0.15);
+      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+      osc2.start(now + 0.15);
+      osc2.stop(now + 0.45);
+    } catch {
+      // Audio playback fails gracefully
+    }
+  },
+
+  // Invoice 100% completed triumph chime
+  playInvoiceFinished(volume = 0.8) {
+    try {
+      const ctx = getAudioContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const notes = [523.25, 659.25, 783.99, 1046.5]; // C5, E5, G5, C6
+      
+      notes.forEach((freq, idx) => {
+        const noteTime = now + idx * 0.08;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, noteTime);
+        gain.gain.setValueAtTime(volume * 0.4, noteTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, noteTime + 0.2);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(noteTime);
+        osc.stop(noteTime + 0.2);
+      });
+    } catch {
+      // Audio playback fails gracefully
+    }
+  },
+
   // Trigger vibration if supported on device
   vibrate(pattern: number | number[]) {
     if (typeof window !== 'undefined' && 'vibrate' in navigator) {

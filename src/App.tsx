@@ -1,4 +1,27 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import type { 
+  ActiveInvoiceSession, 
+  AuditDiscrepancy, 
+  SyncMetadata, 
+  AppSettings,
+  MasterInvoiceItem,
+  ScannedAuditItem
+} from './types';
+import { 
+  getActiveSession, 
+  saveActiveSession, 
+  getAllAuditDiscrepancies, 
+  getSyncMetadata, 
+  getAppSettings, 
+  saveAppSettings,
+  getInvoiceMasterItems,
+  doesInvoiceExist,
+  getAllMasterItems,
+  DEFAULT_SETTINGS
+} from './services/db';
+import { useScannerListener } from './services/scannerListener';
+import { SoundEffects } from './services/audio';
+
 import { Navbar } from './components/Navbar';
 import { ActiveAuditScreen } from './components/ActiveAuditScreen';
 import { ErrorReportScreen } from './components/ErrorReportScreen';
@@ -6,136 +29,136 @@ import { MasterDatabaseView } from './components/MasterDatabaseView';
 import { ScannerSimulator } from './components/ScannerSimulator';
 import { ExcelSyncModal } from './components/ExcelSyncModal';
 import { InvoiceSummaryModal } from './components/InvoiceSummaryModal';
-import { 
-  getSyncMetadata, 
-  getActiveSession, 
-  getAllAuditDiscrepancies, 
-  getAppSettings, 
-  saveAppSettings,
-  saveActiveSession,
-  getInvoiceMasterItems,
-  saveMasterInvoiceItems,
-  doesInvoiceExist,
-  getAllUniqueInvoices
-} from './services/db';
-import { getSampleDailyItems } from './services/excelService';
-import { useScannerListener } from './services/scannerListener';
-import { SoundEffects } from './services/audio';
-import type { 
-  ActiveInvoiceSession, 
-  AuditDiscrepancy, 
-  SyncMetadata, 
-  AppSettings, 
-  MasterInvoiceItem,
-  ScannedAuditItem 
-} from './types';
 
-export default function App() {
+// Helper for finding matching key ignoring case, whitespace, and leading zeros
+function findMatchingItemKey(items: Record<string, ScannedAuditItem>, code: string): string | null {
+  const clean = code.trim();
+  if (items[clean]) return clean;
+
+  const cleanLower = clean.toLowerCase();
+  const strippedClean = clean.replace(/^0+/, '');
+
+  for (const key of Object.keys(items)) {
+    if (key.toLowerCase() === cleanLower) return key;
+    if (strippedClean && key.replace(/^0+/, '').toLowerCase() === strippedClean.toLowerCase()) return key;
+  }
+  return null;
+}
+
+export function App() {
   const [currentTab, setCurrentTab] = useState<'audit' | 'errors' | 'master' | 'settings'>('audit');
+  const [activeSession, setActiveSession] = useState<ActiveInvoiceSession | null>(null);
+  const [discrepancies, setDiscrepancies] = useState<AuditDiscrepancy[]>([]);
   const [syncMeta, setSyncMeta] = useState<SyncMetadata>({
     lastSyncDate: null,
     totalInvoices: 0,
     totalItems: 0,
     fileName: null,
   });
-  const [activeSession, setActiveSession] = useState<ActiveInvoiceSession | null>(null);
-  const [discrepancies, setDiscrepancies] = useState<AuditDiscrepancy[]>([]);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [masterItemsList, setMasterItemsList] = useState<MasterInvoiceItem[]>([]);
-  const [settings, setSettings] = useState<AppSettings>({
-    soundEnabled: true,
-    soundVolume: 0.8,
-    vibrationEnabled: true,
-    scannerPrefixInvoice: 'INV-',
-    scannerMinLength: 3,
-    autoSwitchOnNewInvoice: true,
-  });
-
+  
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [summaryModalState, setSummaryModalState] = useState<{
     isOpen: boolean;
     invoiceNo: string;
     discardedCount: number;
     archivedDiscrepancies: AuditDiscrepancy[];
+    totalRequiredQty?: number;
+    totalScannedQty?: number;
+    totalLineItems?: number;
   }>({
     isOpen: false,
     invoiceNo: '',
     discardedCount: 0,
     archivedDiscrepancies: [],
+    totalRequiredQty: 0,
+    totalScannedQty: 0,
+    totalLineItems: 0,
   });
+  const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
 
-  // Initial load from IndexedDB
+  // Listen for PWA Install Prompt
   useEffect(() => {
-    initializeApp();
+    const handleBeforeInstallPrompt = (e: Event) => {
+      e.preventDefault();
+      setDeferredInstallPrompt(e);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
   }, []);
 
-  const initializeApp = async () => {
-    try {
-      const [meta, session, errors, appSettings] = await Promise.all([
-        getSyncMetadata(),
-        getActiveSession(),
-        getAllAuditDiscrepancies(),
-        getAppSettings(),
-      ]);
-
-      setSettings(appSettings);
-      setDiscrepancies(errors);
-      setActiveSession(session);
-
-      // If database is completely empty on first launch, preload sample daily dataset
-      if (!meta.lastSyncDate || meta.totalItems === 0) {
-        const sampleItems = getSampleDailyItems();
-        const newMeta = await saveMasterInvoiceItems(sampleItems, 'Daily_Warehouse_Manifest_Demo.xlsx');
-        setSyncMeta(newMeta);
-        setMasterItemsList(sampleItems);
-      } else {
-        setSyncMeta(meta);
-        const unique = await getAllUniqueInvoices();
-        // Load all items for simulator
-        const allItems: MasterInvoiceItem[] = [];
-        for (const u of unique) {
-          const items = await getInvoiceMasterItems(u.invoiceNo);
-          allItems.push(...items);
-        }
-        setMasterItemsList(allItems);
-      }
-    } catch (err) {
-      console.error('Failed to initialize IndexedDB storage', err);
+  const handleInstallPwa = async () => {
+    if (!deferredInstallPrompt) return;
+    deferredInstallPrompt.prompt();
+    const choiceResult = await deferredInstallPrompt.userChoice;
+    if (choiceResult.outcome === 'accepted') {
+      setDeferredInstallPrompt(null);
     }
   };
 
+  // Initial Load from local IndexedDB (100% Offline)
+  useEffect(() => {
+    async function initOfflineStorage() {
+      try {
+        const [savedSession, savedDiscrepancies, savedMeta, savedSettings, allMaster] = await Promise.all([
+          getActiveSession(),
+          getAllAuditDiscrepancies(),
+          getSyncMetadata(),
+          getAppSettings(),
+          getAllMasterItems(),
+        ]);
+
+        if (savedSession) setActiveSession(savedSession);
+        if (savedDiscrepancies) setDiscrepancies(savedDiscrepancies);
+        if (savedMeta) setSyncMeta(savedMeta);
+        if (savedSettings) setSettings(savedSettings);
+        if (allMaster) setMasterItemsList(allMaster);
+      } catch (err) {
+        console.error('Error initializing offline database', err);
+      }
+    }
+
+    initOfflineStorage();
+  }, []);
+
   const refreshDiscrepancies = async () => {
-    const all = await getAllAuditDiscrepancies();
-    setDiscrepancies(all);
+    const list = await getAllAuditDiscrepancies();
+    setDiscrepancies(list);
   };
 
   const refreshMasterData = async () => {
-    const meta = await getSyncMetadata();
+    const [meta, items] = await Promise.all([
+      getSyncMetadata(),
+      getAllMasterItems(),
+    ]);
     setSyncMeta(meta);
-    const unique = await getAllUniqueInvoices();
-    const allItems: MasterInvoiceItem[] = [];
-    for (const u of unique) {
-      const items = await getInvoiceMasterItems(u.invoiceNo);
-      allItems.push(...items);
-    }
-    setMasterItemsList(allItems);
+    setMasterItemsList(items);
   };
 
-  // Switch / complete current invoice session
+  // Called when an invoice completes or switches
   const handleInvoiceCompleted = (
     invoiceNo: string, 
     discarded: number, 
-    archivedErrors: AuditDiscrepancy[]
+    discList: AuditDiscrepancy[], 
+    totalRequiredQty = 0, 
+    totalScannedQty = 0, 
+    totalLineItems = 0
   ) => {
     setSummaryModalState({
       isOpen: true,
       invoiceNo,
       discardedCount: discarded,
-      archivedDiscrepancies: archivedErrors,
+      archivedDiscrepancies: discList,
+      totalRequiredQty,
+      totalScannedQty,
+      totalLineItems,
     });
     refreshDiscrepancies();
   };
 
-  // STEP A: Lock Invoice from barcode or UI
+  // STEP A: Lock onto Invoice
   const lockInvoiceByBarcode = useCallback(async (invoiceNo: string) => {
     const cleanInvoice = invoiceNo.trim();
     if (!cleanInvoice) return;
@@ -144,7 +167,7 @@ export default function App() {
     const initialItems: Record<string, ScannedAuditItem> = {};
     const now = new Date().toISOString();
 
-    masterItems.forEach((m) => {
+    masterItems.forEach((m, idx) => {
       initialItems[m.itemCode] = {
         itemCode: m.itemCode,
         itemName: m.itemName,
@@ -155,6 +178,7 @@ export default function App() {
         qtyStatus: 'SHORTAGE',
         lastScannedAt: now,
         scanHistory: [],
+        originalIndex: m.originalIndex !== undefined ? m.originalIndex : idx,
       };
     });
 
@@ -164,6 +188,7 @@ export default function App() {
       lastActivityAt: now,
       items: initialItems,
       isLocked: true,
+      lastScannedItemCode: null,
     };
 
     await saveActiveSession(newSession);
@@ -174,7 +199,7 @@ export default function App() {
     if (settings.vibrationEnabled) SoundEffects.vibrate(100);
   }, [settings.soundEnabled, settings.soundVolume, settings.vibrationEnabled]);
 
-  // STEP B: Scan Item within active invoice
+  // STEP B: Random Item Scan within active invoice (Supports ANY item in ANY order)
   const scanItemByBarcode = useCallback(async (code: string, currentSession: ActiveInvoiceSession) => {
     const cleanCode = code.trim();
     if (!cleanCode) return;
@@ -183,14 +208,13 @@ export default function App() {
     const items = { ...session.items };
     const now = new Date().toISOString();
 
-    let targetItem = items[cleanCode];
-    if (!targetItem) {
-      const matchKey = Object.keys(items).find(k => k.toLowerCase() === cleanCode.toLowerCase());
-      if (matchKey) targetItem = items[matchKey];
-    }
+    const matchingKey = findMatchingItemKey(items, cleanCode);
+    let targetItem = matchingKey ? items[matchingKey] : null;
+    let resolvedItemCode = cleanCode;
 
     if (targetItem) {
       // MATCH
+      resolvedItemCode = targetItem.itemCode;
       const newActualQty = targetItem.actualQty + 1;
       let newQtyStatus: 'EXACT' | 'SHORTAGE' | 'SURPLUS' = 'SHORTAGE';
 
@@ -230,11 +254,13 @@ export default function App() {
         qtyStatus: 'SURPLUS',
         lastScannedAt: now,
         scanHistory: [now],
+        originalIndex: 9999 + Object.keys(items).length,
       };
     }
 
     session.items = items;
     session.lastActivityAt = now;
+    session.lastScannedItemCode = resolvedItemCode;
 
     await saveActiveSession(session);
     setActiveSession(session);
@@ -255,7 +281,6 @@ export default function App() {
     } else {
       // If user scans a different invoice barcode while an invoice is active -> Automatic Switch & Clean!
       if ((existsAsInvoice || looksLikeInvoice) && clean.toLowerCase() !== activeSession.invoiceNo.toLowerCase()) {
-        // Automatically evaluate previous invoice
         const prevSession = activeSession;
         const allItems: ScannedAuditItem[] = Object.values(prevSession.items);
         const auditedAt = new Date().toISOString();
@@ -288,7 +313,7 @@ export default function App() {
         // Immediately lock onto new invoice
         await lockInvoiceByBarcode(clean);
       } else {
-        // Step B: Item scan in current session
+        // Step B: Item scan in current session (Random sequence)
         await scanItemByBarcode(clean, activeSession);
       }
     }
@@ -308,8 +333,18 @@ export default function App() {
     handleUpdateSettings({ ...settings, soundEnabled: !settings.soundEnabled });
   };
 
+  const handleToggleLanguage = () => {
+    const newLang = settings.language === 'ar' ? 'en' : 'ar';
+    handleUpdateSettings({ ...settings, language: newLang });
+  };
+
+  const isRtl = settings.language === 'ar';
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-white">
+    <div 
+      className={`min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-white ${isRtl ? 'rtl' : 'ltr'}`}
+      dir={isRtl ? 'rtl' : 'ltr'}
+    >
       {/* Top Navigation Bar */}
       <Navbar
         currentTab={currentTab}
@@ -317,9 +352,12 @@ export default function App() {
         syncMeta={syncMeta}
         onOpenSyncModal={() => setIsSyncModalOpen(true)}
         errorCount={discrepancies.length}
-        soundEnabled={settings.soundEnabled}
+        settings={settings}
         onToggleSound={handleToggleSound}
+        onToggleLanguage={handleToggleLanguage}
         isScannerActive={isScannerActive}
+        canInstallPwa={Boolean(deferredInstallPrompt)}
+        onInstallPwa={handleInstallPwa}
       />
 
       {/* Main Screen Content */}
@@ -328,8 +366,8 @@ export default function App() {
           <ActiveAuditScreen
             activeSession={activeSession}
             setActiveSession={setActiveSession}
-            soundEnabled={settings.soundEnabled}
-            vibrationEnabled={settings.vibrationEnabled}
+            settings={settings}
+            onUpdateSettings={handleUpdateSettings}
             onInvoiceCompleted={handleInvoiceCompleted}
             onOpenSyncModal={() => setIsSyncModalOpen(true)}
             lastScannedCode={lastScannedBarcode}
@@ -383,6 +421,10 @@ export default function App() {
         invoiceNo={summaryModalState.invoiceNo}
         discardedCount={summaryModalState.discardedCount}
         archivedDiscrepancies={summaryModalState.archivedDiscrepancies}
+        totalRequiredQty={summaryModalState.totalRequiredQty}
+        totalScannedQty={summaryModalState.totalScannedQty}
+        totalLineItems={summaryModalState.totalLineItems}
+        language={settings.language}
         onViewErrorReport={() => {
           setSummaryModalState(prev => ({ ...prev, isOpen: false }));
           setCurrentTab('errors');
@@ -395,3 +437,5 @@ export default function App() {
     </div>
   );
 }
+
+export default App;
