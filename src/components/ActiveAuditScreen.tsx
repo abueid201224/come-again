@@ -25,16 +25,22 @@ import {
   Trash2,
   Layers,
   ShieldAlert,
-  Archive
+  Archive,
+  Ban,
+  Check,
+  HelpCircle,
+  SlidersHorizontal
 } from 'lucide-react';
 import type { 
   ActiveInvoiceSession, 
   MasterInvoiceItem, 
   ScannedAuditItem, 
   AuditDiscrepancy,
+  WrongPickingItem,
   AppSettings,
   IncompleteInvoiceRecord,
-  CompletedInvoiceRecord
+  CompletedInvoiceRecord,
+  LongBarcodePolicy
 } from '../types';
 import { 
   getInvoiceMasterItems, 
@@ -50,7 +56,10 @@ import {
   getAllIncompleteInvoices,
   getIncompleteInvoice,
   deleteIncompleteInvoice,
-  getInvoicesAuditSummaryStats
+  getInvoicesAuditSummaryStats,
+  saveWrongPicking,
+  findItemBelonging,
+  getWrongPickingsByInvoice
 } from '../services/db';
 import { SoundEffects } from '../services/audio';
 import { translations } from '../services/i18n';
@@ -114,6 +123,13 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
   const [blockedInvoiceWarning, setBlockedInvoiceWarning] = useState<{
     invoiceNo: string;
     completedRecord: CompletedInvoiceRecord;
+  } | null>(null);
+
+  // Long Barcode Warning & Decision Modal (> 10 digits)
+  const [longBarcodePrompt, setLongBarcodePrompt] = useState<{
+    isOpen: boolean;
+    barcode: string;
+    length: number;
   } | null>(null);
 
   const [recentScanFeedback, setRecentScanFeedback] = useState<{ 
@@ -249,6 +265,7 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
         items: initialItems,
         isLocked: true,
         lastScannedItemCode: null,
+        longBarcodePolicy: 'ASK', // Reset policy to prompt alert for each new invoice session
       };
 
       await saveActiveSession(newSession);
@@ -276,13 +293,12 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
     }
   };
 
-  // STEP B: Handle Random Item Scan (Works for ANY item in ANY order at ANY time)
-  const handleItemScan = async (scannedItemCode: string) => {
-    if (!activeSession) return;
+  // Core scan execution (increment item count and update session state)
+  const executeRecordItemScan = async (scannedItemCode: string, currentSession: ActiveInvoiceSession) => {
     const cleanCode = scannedItemCode.trim();
     if (!cleanCode) return;
 
-    const session = { ...activeSession };
+    const session = { ...currentSession };
     const items = { ...session.items };
     const now = new Date().toISOString();
 
@@ -294,7 +310,7 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
     let resolvedItemCode = cleanCode;
 
     if (targetItem) {
-      // ITEM BELONGS TO INVOICE (Code_Status: MATCH)
+      // ITEM BELONGS TO INVOICE (Calculate Shortage, Exact, Surplus strictly for invoice items)
       resolvedItemCode = targetItem.itemCode;
       const newActualQty = targetItem.actualQty + 1;
       let newQtyStatus: 'EXACT' | 'SHORTAGE' | 'SURPLUS' = 'SHORTAGE';
@@ -332,47 +348,192 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
         lastScannedAt: now,
         scanHistory: [...(targetItem.scanHistory || []), now],
       };
+
+      session.items = items;
+      session.lastActivityAt = now;
+      session.lastScannedItemCode = resolvedItemCode;
+
+      setRecentScanFeedback({
+        code: resolvedItemCode,
+        itemName: targetItem.itemName,
+        currentQty: newActualQty,
+        reqQty: targetItem.requiredQty,
+        unit: targetItem.unit,
+        message: feedbackMsg,
+        type: feedbackType,
+      });
+
+      await saveActiveSession(session);
+      setActiveSession(session);
     } else {
-      // ITEM DOES NOT BELONG TO INVOICE (Code_Status: MISMATCH)
-      feedbackType = 'mismatch';
-      feedbackMsg = isRtl 
-        ? `صنف غير مدرج! الباركود [${cleanCode}] ليس من أصناف الفاتورة ${session.invoiceNo}!` 
-        : `MISMATCH ALERT! Item [${cleanCode}] is NOT listed in Invoice ${session.invoiceNo}!`;
+      // ITEM DOES NOT BELONG TO INVOICE -> WRONG PICKING (تجهيز خاطئ)
+      // DO NOT add to session.items! Divert directly to dedicated Wrong Picking Report.
       if (settings.soundEnabled) SoundEffects.playMismatchWarning(settings.soundVolume);
       if (settings.vibrationEnabled) SoundEffects.vibrate([200, 100, 200, 100, 200]);
 
-      items[cleanCode] = {
+      // Look up if this item belongs to another invoice/order in master database
+      const belonging = await findItemBelonging(cleanCode);
+
+      await saveWrongPicking({
+        activeInvoiceNo: session.invoiceNo,
         orderNo: session.orderNo,
         itemCode: cleanCode,
-        itemName: isRtl ? `صنف غير مدرج (${cleanCode})` : `Unknown Item (${cleanCode})`,
-        unit: 'PCS',
-        requiredQty: 0,
-        actualQty: 1,
-        codeStatus: 'MISMATCH',
-        qtyStatus: 'SURPLUS',
-        lastScannedAt: now,
-        scanHistory: [now],
-        originalIndex: 9999 + Object.keys(items).length,
-      };
-      targetItem = items[cleanCode];
+        itemName: belonging?.itemName || (isRtl ? 'صنف دخيل غير مدرج بالفاتورة' : 'Foreign Unlisted Item'),
+        unit: belonging?.unit || 'PCS',
+        actualBelongingInvoiceNo: belonging?.invoiceNo,
+        actualBelongingOrderNo: belonging?.orderNo,
+        scannedAt: now,
+        auditorName: settings.auditorName || 'أحمد حمادة',
+        auditorId: settings.auditorId || 'AUD-101',
+        quantity: 1,
+        notes: belonging?.invoiceNo 
+          ? (isRtl ? `صنف يتبع الفاتورة ${belonging.invoiceNo}${belonging.orderNo ? ` (أوردر: ${belonging.orderNo})` : ''}` : `Belongs to Invoice ${belonging.invoiceNo}`)
+          : (isRtl ? 'صنف غير مدرج بقاعدة البيانات' : 'Item not found in master database'),
+      });
+
+      feedbackType = 'mismatch';
+      feedbackMsg = isRtl 
+        ? `⚠️ تجهيز خاطئ! الباركود [${cleanCode}] لا ينتمي للفاتورة ${session.invoiceNo}! لم يتم إضافته لسجل الفاتورة ورُحّل لتقرير التجهيز الخاطئ.${belonging?.invoiceNo ? ` (ينتمي للفاتورة: ${belonging.invoiceNo})` : ''}` 
+        : `⚠️ WRONG PICKING! Item [${cleanCode}] does NOT belong to Invoice ${session.invoiceNo}! Excluded from invoice ledger and routed to Wrong Picking Report.${belonging?.invoiceNo ? ` (Belongs to: ${belonging.invoiceNo})` : ''}`;
+
+      setRecentScanFeedback({
+        code: cleanCode,
+        itemName: belonging?.itemName || (isRtl ? 'تجهيز خاطئ (مستبعد من الفاتورة)' : 'Wrong Picking (Excluded)'),
+        currentQty: 0,
+        reqQty: 0,
+        unit: belonging?.unit || 'PCS',
+        message: feedbackMsg,
+        type: 'mismatch',
+      });
+
+      // Update session activity timestamp without polluting items table
+      session.lastActivityAt = now;
+      await saveActiveSession(session);
+      setActiveSession(session);
+    }
+  };
+
+  // STEP B: Handle Random Item Scan (with > 10 digits conditional rule)
+  const handleItemScan = async (scannedItemCode: string) => {
+    if (!activeSession) return;
+    const cleanCode = scannedItemCode.trim();
+    if (!cleanCode) return;
+
+    const threshold = settings.longBarcodeThreshold || 10;
+    const isLongBarcode = cleanCode.length > threshold;
+
+    if (isLongBarcode) {
+      const policy: LongBarcodePolicy = activeSession.longBarcodePolicy || 'ASK';
+
+      if (policy === 'BLOCK') {
+        // Automatically reject/ignore without popping up modal
+        if (settings.soundEnabled) SoundEffects.playMismatchWarning(settings.soundVolume * 0.5);
+        setRecentScanFeedback({
+          code: cleanCode,
+          message: isRtl 
+            ? `⚠️ تم تجاهل الباركود [${cleanCode}] (${cleanCode.length} رقم) تلقائياً وفقاً لقرار عدم السماح لهذه الجلسة.`
+            : `⚠️ Barcode [${cleanCode}] (${cleanCode.length} digits) blocked according to session policy.`,
+          type: 'blocked',
+        });
+        focusAndClearInput();
+        return;
+      }
+
+      if (policy === 'ASK') {
+        // Trigger alert sound & open the 3-option modal
+        if (settings.soundEnabled) SoundEffects.playLongBarcodeAlert(settings.soundVolume);
+        if (settings.vibrationEnabled) SoundEffects.vibrate([150, 80, 150]);
+
+        setLongBarcodePrompt({
+          isOpen: true,
+          barcode: cleanCode,
+          length: cleanCode.length,
+        });
+        focusAndClearInput();
+        return;
+      }
+
+      // If policy === 'ALLOW': Proceed directly to record barcode without alert
     }
 
-    session.items = items;
-    session.lastActivityAt = now;
-    session.lastScannedItemCode = resolvedItemCode;
+    // Normal item recording
+    await executeRecordItemScan(cleanCode, activeSession);
+    focusAndClearInput();
+  };
+
+  // Modal Action 1: ALLOW for entire session (سماح)
+  const handleLongBarcodeAllow = async () => {
+    if (!activeSession || !longBarcodePrompt) return;
+    const barcodeToRecord = longBarcodePrompt.barcode;
+
+    const updatedSession: ActiveInvoiceSession = {
+      ...activeSession,
+      longBarcodePolicy: 'ALLOW',
+    };
+    await saveActiveSession(updatedSession);
+    setActiveSession(updatedSession);
+    setLongBarcodePrompt(null);
+
+    // Record the barcode
+    await executeRecordItemScan(barcodeToRecord, updatedSession);
+    focusAndClearInput();
+  };
+
+  // Modal Action 2: BLOCK for entire session (عدم السماح)
+  const handleLongBarcodeBlock = async () => {
+    if (!activeSession || !longBarcodePrompt) return;
+    const barcodeToBlock = longBarcodePrompt.barcode;
+
+    const updatedSession: ActiveInvoiceSession = {
+      ...activeSession,
+      longBarcodePolicy: 'BLOCK',
+    };
+    await saveActiveSession(updatedSession);
+    setActiveSession(updatedSession);
+    setLongBarcodePrompt(null);
 
     setRecentScanFeedback({
-      code: resolvedItemCode,
-      itemName: targetItem?.itemName,
-      currentQty: targetItem?.actualQty,
-      reqQty: targetItem?.requiredQty,
-      unit: targetItem?.unit,
-      message: feedbackMsg,
-      type: feedbackType,
+      code: barcodeToBlock,
+      message: isRtl 
+        ? `تم اعتماد [عدم السماح]: تم تجاهل الباركود (${barcodeToBlock}) وسيتم حظر أي باركود أطول من ${settings.longBarcodeThreshold || 10} أرقام حتى نهاية الجلسة بدون تنبيه.`
+        : `Policy set to [BLOCK]: Barcode (${barcodeToBlock}) ignored and all barcodes > 10 digits will be blocked for this session.`,
+      type: 'blocked',
     });
+    focusAndClearInput();
+  };
 
-    await saveActiveSession(session);
-    setActiveSession(session);
+  // Modal Action 3: DECIDE LATER (Skip once, keep prompt active for future) (قرر لاحقاً)
+  const handleLongBarcodeDecideLater = async () => {
+    if (!activeSession || !longBarcodePrompt) return;
+    const barcodeToSkip = longBarcodePrompt.barcode;
+
+    const updatedSession: ActiveInvoiceSession = {
+      ...activeSession,
+      longBarcodePolicy: 'ASK',
+    };
+    await saveActiveSession(updatedSession);
+    setActiveSession(updatedSession);
+    setLongBarcodePrompt(null);
+
+    setRecentScanFeedback({
+      code: barcodeToSkip,
+      message: isRtl 
+        ? `تم تخطي الباركود [${barcodeToSkip}] دون تسجيل. سيستمر ظهور التنبيه عند مسح أي باركود أطول من ${settings.longBarcodeThreshold || 10} أرقام.`
+        : `Barcode [${barcodeToSkip}] skipped without recording; prompt will appear again for long barcodes.`,
+      type: 'blocked',
+    });
+    focusAndClearInput();
+  };
+
+  // Quick toggle long barcode policy from session header
+  const handleToggleLongBarcodePolicy = async (newPolicy: LongBarcodePolicy) => {
+    if (!activeSession) return;
+    const updatedSession: ActiveInvoiceSession = {
+      ...activeSession,
+      longBarcodePolicy: newPolicy,
+    };
+    await saveActiveSession(updatedSession);
+    setActiveSession(updatedSession);
     focusAndClearInput();
   };
 
@@ -967,6 +1128,43 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
                     <span className="text-xs text-slate-400 font-mono">
                       {new Date(activeSession.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </span>
+
+                    {/* Long Barcode Policy Status Tag */}
+                    <div className="flex items-center gap-1.5">
+                      {activeSession.longBarcodePolicy === 'ALLOW' && (
+                        <button
+                          type="button" 
+                          onClick={() => handleToggleLongBarcodePolicy('BLOCK')}
+                          title={isRtl ? 'اضغط للتبديل إلى حظر الباركود > 10' : 'Click to toggle blocking barcodes > 10'}
+                          className="text-[11px] font-bold bg-emerald-950 text-emerald-300 px-2.5 py-0.5 rounded-full border border-emerald-700/70 flex items-center gap-1 hover:bg-emerald-900 transition-colors shadow-sm"
+                        >
+                          <Check className="w-3 h-3 text-emerald-400" />
+                          <span>{isRtl ? 'باركود > 10: مسموح به' : 'Barcode > 10: Allowed'}</span>
+                        </button>
+                      )}
+                      {activeSession.longBarcodePolicy === 'BLOCK' && (
+                        <button
+                          type="button" 
+                          onClick={() => handleToggleLongBarcodePolicy('ALLOW')}
+                          title={isRtl ? 'اضغط للتبديل إلى السماح بالباركود > 10' : 'Click to toggle allowing barcodes > 10'}
+                          className="text-[11px] font-bold bg-red-950 text-red-300 px-2.5 py-0.5 rounded-full border border-red-700/70 flex items-center gap-1 hover:bg-red-900 transition-colors shadow-sm"
+                        >
+                          <Ban className="w-3 h-3 text-red-400" />
+                          <span>{isRtl ? 'باركود > 10: غير مسموح' : 'Barcode > 10: Blocked'}</span>
+                        </button>
+                      )}
+                      {(!activeSession.longBarcodePolicy || activeSession.longBarcodePolicy === 'ASK') && (
+                        <button
+                          type="button" 
+                          onClick={() => handleToggleLongBarcodePolicy('ALLOW')}
+                          title={isRtl ? 'اضغط لضبط الخيار' : 'Click to configure'}
+                          className="text-[11px] font-bold bg-amber-950/70 text-amber-300 px-2.5 py-0.5 rounded-full border border-amber-700/70 flex items-center gap-1 hover:bg-amber-900 transition-colors shadow-sm"
+                        >
+                          <HelpCircle className="w-3 h-3 text-amber-400" />
+                          <span>{isRtl ? 'باركود > 10: تنبيه وتخيير' : 'Barcode > 10: Prompt'}</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <h2 className="text-2xl sm:text-3xl font-black font-mono text-white tracking-tight mt-1">
                     {activeSession.invoiceNo}
@@ -1483,6 +1681,97 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
                 className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-lg"
               >
                 {isRtl ? 'إغلاق' : 'Close'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🌟 8. LONG BARCODE ALERT & DECISION MODAL (> 10 digits) */}
+      {longBarcodePrompt && longBarcodePrompt.isOpen && (
+        <div className={`fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 ${isRtl ? 'rtl text-right' : 'ltr text-left'}`} dir={isRtl ? 'rtl' : 'ltr'}>
+          <div className="bg-slate-900 border-2 border-amber-500 rounded-2xl p-5 sm:p-6 shadow-2xl max-w-lg w-full text-slate-100 animate-in zoom-in-95 duration-150 space-y-4">
+            {/* Header */}
+            <div className="flex items-center gap-3 text-amber-400 pb-3 border-b border-slate-800">
+              <div className="p-3 bg-amber-950 border border-amber-600/70 rounded-xl">
+                <AlertTriangle className="w-7 h-7 animate-pulse text-amber-400" />
+              </div>
+              <div>
+                <h3 className="text-lg sm:text-xl font-black text-white">
+                  {isRtl ? 'تنبيه: باركود أطول من 10 أرقام!' : 'Alert: Barcode Longer Than 10 Digits!'}
+                </h3>
+                <p className="text-xs text-amber-300">
+                  {isRtl 
+                    ? `تم رصد باركود بطول (${longBarcodePrompt.length}) رقم. لم يتم تسجيله تلقائياً حتى تحدد الإجراء:` 
+                    : `Detected barcode with (${longBarcodePrompt.length}) digits. Not recorded yet:`}
+                </p>
+              </div>
+            </div>
+
+            {/* Scanned Barcode Display */}
+            <div className="bg-slate-950 border border-amber-500/40 rounded-xl p-3.5 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 overflow-hidden">
+                <ScanLine className="w-5 h-5 text-amber-400 shrink-0" />
+                <span className="font-mono font-black text-sm sm:text-base text-amber-300 tracking-wider break-all">
+                  {longBarcodePrompt.barcode}
+                </span>
+              </div>
+              <span className="text-xs font-bold bg-amber-950 text-amber-300 px-2.5 py-1 rounded-lg border border-amber-700 font-mono shrink-0">
+                {longBarcodePrompt.length} {isRtl ? 'أرقام' : 'digits'}
+              </span>
+            </div>
+
+            {/* Options Explanation */}
+            <div className="text-xs text-slate-300 space-y-2 bg-slate-950/60 p-3.5 rounded-xl border border-slate-800 leading-relaxed">
+              <p className="text-slate-200 font-semibold mb-1">
+                {isRtl ? 'اختر الإجراء المناسب لهذه الجلسة:' : 'Choose action for this audit session:'}
+              </p>
+              <div className="space-y-1.5 text-[11.5px]">
+                <div className="flex items-start gap-1.5 text-emerald-400">
+                  <Check className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span><strong>{isRtl ? 'سماح:' : 'Allow:'}</strong> {isRtl ? 'تسجيل هذا الباركود واعتماد قبول أي باركود > 10 أرقام طوال الجلسة بدون تنبيه.' : 'Record barcode and allow all > 10 digits for the rest of session without alerts.'}</span>
+                </div>
+                <div className="flex items-start gap-1.5 text-red-400">
+                  <Ban className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span><strong>{isRtl ? 'عدم السماح:' : 'Block:'}</strong> {isRtl ? 'عدم تسجيل هذا الباركود وحظر أي باركود > 10 أرقام طوال الجلسة بدون تنبيه.' : 'Do not record, and block all > 10 digits for the rest of session without alerts.'}</span>
+                </div>
+                <div className="flex items-start gap-1.5 text-amber-300">
+                  <Clock className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span><strong>{isRtl ? 'قرر لاحقاً:' : 'Decide Later:'}</strong> {isRtl ? 'تخطي هذا الباركود دون تسجيل، واستمرار التنبيه عند مسح باركودات طويلة أخرى.' : 'Skip this barcode without recording; alert will prompt again for future long barcodes.'}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2">
+              {/* 1. ALLOW (سماح) */}
+              <button
+                type="button"
+                onClick={handleLongBarcodeAllow}
+                className="flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-black py-3 px-3 rounded-xl text-xs sm:text-sm shadow-md shadow-emerald-950/40 transition-all border border-emerald-400/40"
+              >
+                <Check className="w-4 h-4 stroke-[3]" />
+                <span>{isRtl ? 'سماح' : 'Allow'}</span>
+              </button>
+
+              {/* 2. BLOCK (عدم السماح) */}
+              <button
+                type="button"
+                onClick={handleLongBarcodeBlock}
+                className="flex items-center justify-center gap-2 bg-red-600 hover:bg-red-500 active:bg-red-700 text-white font-black py-3 px-3 rounded-xl text-xs sm:text-sm shadow-md shadow-red-950/40 transition-all border border-red-400/40"
+              >
+                <Ban className="w-4 h-4 stroke-[3]" />
+                <span>{isRtl ? 'عدم السماح' : 'Block'}</span>
+              </button>
+
+              {/* 3. DECIDE LATER (قرر لاحقاً) */}
+              <button
+                type="button"
+                onClick={handleLongBarcodeDecideLater}
+                className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 active:bg-slate-900 text-amber-300 font-black py-3 px-3 rounded-xl text-xs sm:text-sm shadow transition-all border border-slate-700 hover:border-amber-500/50"
+              >
+                <Clock className="w-4 h-4 text-amber-400" />
+                <span>{isRtl ? 'قرر لاحقاً' : 'Decide Later'}</span>
               </button>
             </div>
           </div>

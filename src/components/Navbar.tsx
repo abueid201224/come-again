@@ -10,23 +10,35 @@ import {
   CheckCircle2,
   Sliders,
   Languages,
-  Smartphone
+  Smartphone,
+  UserCheck,
+  FileSignature,
+  Truck,
+  RotateCcw,
+  Boxes,
+  ListFilter
 } from 'lucide-react';
 import type { SyncMetadata, AppSettings } from '../types';
 import { translations } from '../services/i18n';
 
+export type ActiveNavTab = 'audit' | 'receiving' | 'returns' | 'inventory' | 'picking' | 'errors' | 'master' | 'settings';
+
 interface NavbarProps {
-  currentTab: 'audit' | 'errors' | 'master' | 'settings';
-  setCurrentTab: (tab: 'audit' | 'errors' | 'master' | 'settings') => void;
+  currentTab: ActiveNavTab;
+  setCurrentTab: (tab: ActiveNavTab) => void;
   syncMeta: SyncMetadata;
   onOpenSyncModal: () => void;
   errorCount: number;
+  wrongPickingCount?: number;
+  overdueLabCount?: number;
+  pendingLabCount?: number;
   settings: AppSettings;
   onToggleSound: () => void;
   onToggleLanguage: () => void;
   isScannerActive: boolean;
   canInstallPwa?: boolean;
   onInstallPwa?: () => void;
+  onOpenAuditorModal?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -35,12 +47,16 @@ export const Navbar: React.FC<NavbarProps> = ({
   syncMeta,
   onOpenSyncModal,
   errorCount,
+  wrongPickingCount = 0,
+  overdueLabCount = 0,
+  pendingLabCount = 0,
   settings,
   onToggleSound,
   onToggleLanguage,
   isScannerActive,
   canInstallPwa,
   onInstallPwa,
+  onOpenAuditorModal,
 }) => {
   const t = translations[settings.language] || translations.en;
   const isRtl = settings.language === 'ar';
@@ -65,13 +81,30 @@ export const Navbar: React.FC<NavbarProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400 hidden sm:block">
-              {isRtl ? 'دعم كامل لقارئ الباركود والإسكان العشوائي للأصناف ومزامنة إكسيل' : '1D USB/Bluetooth Barcode Scanner Wedge & Random Scan Support'}
+              {isRtl ? 'دعم كامل لقارئ الباركود والإسكان العشوائي للأصناف ومزامنة إكسيل والتوثيق الرقابي' : '1D USB/Bluetooth Barcode Scanner Wedge & Audit Documentation'}
             </p>
           </div>
         </div>
 
         {/* Action Controls & Sync Button */}
         <div className="flex items-center gap-2 sm:gap-3">
+          {/* Auditor Profile & Signature Trigger */}
+          {onOpenAuditorModal && (
+            <button
+              onClick={onOpenAuditorModal}
+              id="navbar-auditor-profile-btn"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-emerald-600/50 bg-slate-800/90 hover:bg-slate-700 text-xs font-semibold text-emerald-300 transition-colors shadow-sm"
+              title={isRtl ? 'إعدادات وهوية وتوقيع المراجع المسؤول' : 'Lead Auditor Profile & Digital Signature'}
+            >
+              <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden sm:inline">{settings.auditorName || 'أحمد حمادة'}</span>
+              <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1 py-0.2 rounded font-mono border border-emerald-800">
+                {settings.auditorId || 'AUD-101'}
+              </span>
+              <FileSignature className="w-3 h-3 text-emerald-400 hidden sm:inline" />
+            </button>
+          )}
+
           {/* PWA Install Button (When prompt available) */}
           {canInstallPwa && (
             <button
@@ -137,62 +170,131 @@ export const Navbar: React.FC<NavbarProps> = ({
       {/* Primary Navigation Tabs */}
       <div className="bg-slate-950/90 border-t border-slate-800/80 px-2 sm:px-4">
         <nav className="max-w-7xl mx-auto flex items-center gap-1 sm:gap-2 overflow-x-auto py-1.5 scrollbar-none">
+          {/* 1. Inbound Receiving */}
+          <button
+            id="nav-receiving-tab"
+            onClick={() => setCurrentTab('receiving')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              currentTab === 'receiving'
+                ? 'bg-blue-600 text-white shadow-sm ring-1 ring-blue-400'
+                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <Truck className="w-4 h-4 text-blue-300" />
+            <span>{t.receivingTab || (isRtl ? 'الاستلام' : 'Receiving')}</span>
+          </button>
+
+          {/* 2. Dispatch / Invoice Auditor */}
           <button
             id="nav-audit-tab"
             onClick={() => setCurrentTab('audit')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-md text-xs sm:text-sm font-semibold transition-all whitespace-nowrap ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
               currentTab === 'audit'
-                ? 'bg-emerald-600 text-white shadow-sm'
+                ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400'
                 : 'text-slate-300 hover:bg-slate-800 hover:text-white'
             }`}
           >
-            <ScanLine className="w-4 h-4" />
+            <ScanLine className="w-4 h-4 text-emerald-300" />
             <span>{t.activeAudit}</span>
           </button>
 
+          {/* 3. Returns & Refunds (RMA) & Quality Lab */}
           <button
-            id="nav-errors-tab"
-            onClick={() => setCurrentTab('errors')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-md text-xs sm:text-sm font-semibold transition-all whitespace-nowrap ${
-              currentTab === 'errors'
-                ? 'bg-amber-600 text-white shadow-sm'
+            id="nav-returns-tab"
+            onClick={() => setCurrentTab('returns')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              currentTab === 'returns'
+                ? 'bg-amber-600 text-white shadow-sm ring-1 ring-amber-400'
                 : 'text-slate-300 hover:bg-slate-800 hover:text-white'
             }`}
           >
-            <AlertTriangle className="w-4 h-4" />
+            <RotateCcw className="w-4 h-4 text-amber-300" />
+            <span>{t.returnsTab || (isRtl ? 'المرتجعات والفحص' : 'Returns & Lab')}</span>
+            {pendingLabCount > 0 && (
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+                overdueLabCount > 0 ? 'bg-red-500 text-white animate-pulse' : 'bg-amber-500 text-slate-950'
+              }`}>
+                {pendingLabCount} {overdueLabCount > 0 ? '⚠️' : ''}
+              </span>
+            )}
+          </button>
+
+          {/* 4. Cycle Count & Packaging Breakdown */}
+          <button
+            id="nav-inventory-tab"
+            onClick={() => setCurrentTab('inventory')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              currentTab === 'inventory'
+                ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-400'
+                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <Boxes className="w-4 h-4 text-indigo-300" />
+            <span>{t.inventoryTab || (isRtl ? 'الجرد وتجميع العبوات' : 'Inventory')}</span>
+          </button>
+
+          {/* 5. Batch Wave Picking List Generator */}
+          <button
+            id="nav-picking-tab"
+            onClick={() => setCurrentTab('picking')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              currentTab === 'picking'
+                ? 'bg-cyan-600 text-white shadow-sm ring-1 ring-cyan-400'
+                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <ListFilter className="w-4 h-4 text-cyan-300" />
+            <span>{isRtl ? 'قائمة الانتقاء والتجهيز' : 'Picking List'}</span>
+          </button>
+
+          <div className="h-4 w-[1px] bg-slate-800 mx-1 hidden sm:block"></div>
+
+          {/* Discrepancies Report */}
+          <button
+            id="nav-errors-tab"
+            onClick={() => setCurrentTab('errors')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all whitespace-nowrap ${
+              currentTab === 'errors'
+                ? 'bg-red-600 text-white shadow-sm'
+                : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <AlertTriangle className="w-3.5 h-3.5" />
             <span>{t.errorReport}</span>
             {errorCount > 0 && (
-              <span className={`text-[11px] px-1.5 py-0.2 rounded-full font-bold ${
-                currentTab === 'errors' ? 'bg-amber-950 text-amber-200' : 'bg-red-500 text-white'
+              <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                currentTab === 'errors' ? 'bg-red-950 text-red-200' : 'bg-red-500 text-white'
               }`}>
                 {errorCount}
               </span>
             )}
           </button>
 
+          {/* Master Invoices Database */}
           <button
             id="nav-master-tab"
             onClick={() => setCurrentTab('master')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-md text-xs sm:text-sm font-semibold transition-all whitespace-nowrap ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all whitespace-nowrap ${
               currentTab === 'master'
-                ? 'bg-blue-600 text-white shadow-sm'
-                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                ? 'bg-slate-700 text-white shadow-sm'
+                : 'text-slate-400 hover:bg-slate-800 hover:text-white'
             }`}
           >
-            <Database className="w-4 h-4" />
-            <span>{t.masterInvoices} ({syncMeta.totalInvoices})</span>
+            <Database className="w-3.5 h-3.5" />
+            <span>{t.masterInvoices}</span>
           </button>
 
+          {/* Tools & Config */}
           <button
             id="nav-settings-tab"
             onClick={() => setCurrentTab('settings')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-md text-xs sm:text-sm font-semibold transition-all whitespace-nowrap ${isRtl ? 'mr-auto' : 'ml-auto'} ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all whitespace-nowrap ${isRtl ? 'mr-auto' : 'ml-auto'} ${
               currentTab === 'settings'
                 ? 'bg-slate-700 text-white shadow-sm'
                 : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
             }`}
           >
-            <Sliders className="w-4 h-4" />
+            <Sliders className="w-3.5 h-3.5" />
             <span>{t.tools}</span>
           </button>
         </nav>
@@ -215,3 +317,4 @@ export const Navbar: React.FC<NavbarProps> = ({
     </header>
   );
 };
+

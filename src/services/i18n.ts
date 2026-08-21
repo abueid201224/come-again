@@ -2,13 +2,19 @@ export type Language = 'ar' | 'en';
 
 export const translations = {
   ar: {
-    appTitle: 'مدقق فواتير المخزن (باركود)',
+    appTitle: 'مدير عمليات المستودع',
     offlineMode: '100% أوفلاين',
     scannerReady: 'قارئ الباركود الخطي 1D: جاهز',
     qrScannerBtn: 'مسح QR الفاتورة / الأوردر بالكاميرا',
     updateExcel: 'تحديث بيانات إكسيل / مزامنة',
     sync: 'مزامنة',
-    activeAudit: 'جلسة تدقيق الفاتورة',
+    
+    // Core Warehouse Operations Tabs
+    activeAudit: 'مدقق الفواتير والتجهيز',
+    receivingTab: 'الاستلام والمطابقة',
+    returnsTab: 'المرتجعات وطلبات الاسترداد',
+    inventoryTab: 'الجرد وتجميع العبوات',
+    
     errorReport: 'تقرير الأخطاء والنواقص',
     masterInvoices: 'الفواتير والأوردرات',
     tools: 'الأدوات والمحاكي',
@@ -76,18 +82,29 @@ export const translations = {
     itemMismatches: 'أصناف غير مدرجة',
     qtyShortages: 'نواقص بالكمية',
     qtySurpluses: 'زيادات بالكمية',
+    wrongPickingTab: 'تقرير التجهيز الخاطئ والأصناف المستبعدة',
+    invoiceVarianceTab: 'تقرير عجز وزيادة الفواتير',
+    wrongPickingTitle: 'تقرير التجهيز الخاطئ (الأصناف التي لا تنتمي للفاتورة)',
+    wrongPickingDesc: 'أصناف تم مسحها ولا تنتمي للفاتورة المفحوصة - تم استبعادها من جدول الفاتورة وترحيلها هنا مباشرة لمنع تلوث سجلات الجرد.',
+    wrongPickingIntercepted: 'صنف تجهيز خاطئ تم استبعاده',
     
     // Simulator & Random scan tip
     randomScanBanner: '⚡ يدعم الإسكان العشوائي عبر قارئ الباركود الخطي 1D مع إمكانية قراءة QR للفاتورة والأوردر بالكاميرا.',
   },
   en: {
-    appTitle: 'INVOICE AUDITOR',
+    appTitle: 'WAREHOUSE OPERATIONS MANAGER',
     offlineMode: '100% OFFLINE',
     scannerReady: '1D Linear Scanner: Active',
     qrScannerBtn: 'Scan Invoice / Order QR Code (Camera)',
     updateExcel: 'Update Excel Data / Sync',
     sync: 'Sync',
-    activeAudit: 'Active Audit Session',
+    
+    // Core Warehouse Operations Tabs
+    activeAudit: 'Invoice Dispatch Auditor',
+    receivingTab: 'Inbound Receiving',
+    returnsTab: 'Returns & Credit Notes (RMA)',
+    inventoryTab: 'Cycle Count & Packaging',
+    
     errorReport: 'Error Audit Report',
     masterInvoices: 'Master Invoices & Orders',
     tools: 'Tools & Simulator',
@@ -147,6 +164,11 @@ export const translations = {
     itemMismatches: 'Item Mismatches',
     qtyShortages: 'Qty Shortages',
     qtySurpluses: 'Qty Surpluses',
+    wrongPickingTab: 'Wrong Picking & Foreign Items Report',
+    invoiceVarianceTab: 'Invoice Variances (Shortage / Surplus)',
+    wrongPickingTitle: 'Wrong Picking Report (Items NOT in Invoice)',
+    wrongPickingDesc: 'Items scanned that do not belong to the audited invoice. Automatically excluded from invoice ledger and archived here.',
+    wrongPickingIntercepted: 'Wrong Picking Item Intercepted',
     
     randomScanBanner: '⚡ Supports 1D linear barcode scanner keyboard wedge & camera QR code reader for invoices and order numbers.',
   }

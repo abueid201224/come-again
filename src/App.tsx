@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import type { 
   ActiveInvoiceSession, 
   AuditDiscrepancy, 
+  WrongPickingItem,
   SyncMetadata, 
   AppSettings,
   MasterInvoiceItem,
@@ -11,24 +12,36 @@ import {
   getActiveSession, 
   saveActiveSession, 
   getAllAuditDiscrepancies, 
+  getAllWrongPickings,
+  saveWrongPicking,
+  findItemBelonging,
   getSyncMetadata, 
   getAppSettings, 
   saveAppSettings,
   getInvoiceMasterItems,
   doesInvoiceExist,
   getAllMasterItems,
+  isInvoiceCompleted,
+  getIncompleteInvoice,
+  saveAuditDiscrepancies,
+  getAllReturnReports,
   DEFAULT_SETTINGS
 } from './services/db';
 import { useScannerListener } from './services/scannerListener';
 import { SoundEffects } from './services/audio';
 
-import { Navbar } from './components/Navbar';
+import { Navbar, type ActiveNavTab } from './components/Navbar';
 import { ActiveAuditScreen } from './components/ActiveAuditScreen';
 import { ErrorReportScreen } from './components/ErrorReportScreen';
 import { MasterDatabaseView } from './components/MasterDatabaseView';
 import { ScannerSimulator } from './components/ScannerSimulator';
 import { ExcelSyncModal } from './components/ExcelSyncModal';
 import { InvoiceSummaryModal } from './components/InvoiceSummaryModal';
+import { AuditorSignatureModal } from './components/AuditorSignatureModal';
+import { ReceivingScreen } from './components/ReceivingScreen';
+import { ReturnsScreen } from './components/ReturnsScreen';
+import { InventoryCountScreen } from './components/InventoryCountScreen';
+import { PickingWaveScreen } from './components/PickingWaveScreen';
 
 // Helper for finding matching key ignoring case, whitespace, and leading zeros
 function findMatchingItemKey(items: Record<string, ScannedAuditItem>, code: string): string | null {
@@ -46,9 +59,10 @@ function findMatchingItemKey(items: Record<string, ScannedAuditItem>, code: stri
 }
 
 export function App() {
-  const [currentTab, setCurrentTab] = useState<'audit' | 'errors' | 'master' | 'settings'>('audit');
+  const [currentTab, setCurrentTab] = useState<ActiveNavTab>('audit');
   const [activeSession, setActiveSession] = useState<ActiveInvoiceSession | null>(null);
   const [discrepancies, setDiscrepancies] = useState<AuditDiscrepancy[]>([]);
+  const [wrongPickings, setWrongPickings] = useState<WrongPickingItem[]>([]);
   const [syncMeta, setSyncMeta] = useState<SyncMetadata>({
     lastSyncDate: null,
     totalInvoices: 0,
@@ -57,8 +71,11 @@ export function App() {
   });
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [masterItemsList, setMasterItemsList] = useState<MasterInvoiceItem[]>([]);
+  const [pendingLabCount, setPendingLabCount] = useState<number>(0);
+  const [overdueLabCount, setOverdueLabCount] = useState<number>(0);
   
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [isAuditorModalOpen, setIsAuditorModalOpen] = useState(false);
   const [summaryModalState, setSummaryModalState] = useState<{
     isOpen: boolean;
     invoiceNo: string;
@@ -102,19 +119,28 @@ export function App() {
   useEffect(() => {
     async function initOfflineStorage() {
       try {
-        const [savedSession, savedDiscrepancies, savedMeta, savedSettings, allMaster] = await Promise.all([
+        const [savedSession, savedDiscrepancies, savedWrongPickings, savedMeta, savedSettings, allMaster, allReturns] = await Promise.all([
           getActiveSession(),
           getAllAuditDiscrepancies(),
+          getAllWrongPickings(),
           getSyncMetadata(),
           getAppSettings(),
           getAllMasterItems(),
+          getAllReturnReports(),
         ]);
 
         if (savedSession) setActiveSession(savedSession);
         if (savedDiscrepancies) setDiscrepancies(savedDiscrepancies);
+        if (savedWrongPickings) setWrongPickings(savedWrongPickings);
         if (savedMeta) setSyncMeta(savedMeta);
         if (savedSettings) setSettings(savedSettings);
         if (allMaster) setMasterItemsList(allMaster);
+
+        if (allReturns) {
+          const pending = allReturns.filter(r => r.status === 'PENDING_LAB');
+          setPendingLabCount(pending.length);
+          setOverdueLabCount(pending.filter(r => r.isOverdueForLab).length);
+        }
       } catch (err) {
         console.error('Error initializing offline database', err);
       }
@@ -126,6 +152,11 @@ export function App() {
   const refreshDiscrepancies = async () => {
     const list = await getAllAuditDiscrepancies();
     setDiscrepancies(list);
+  };
+
+  const refreshWrongPickings = async () => {
+    const list = await getAllWrongPickings();
+    setWrongPickings(list);
   };
 
   const refreshMasterData = async () => {
@@ -163,32 +194,52 @@ export function App() {
     const cleanInvoice = invoiceNo.trim();
     if (!cleanInvoice) return;
 
+    // Check if completed
+    const completed = await isInvoiceCompleted(cleanInvoice);
+    if (completed) {
+      if (settings.soundEnabled) SoundEffects.playAlreadyCompletedBlocked(settings.soundVolume);
+      if (settings.vibrationEnabled) SoundEffects.vibrate([200, 100, 200]);
+      setCurrentTab('audit');
+      return;
+    }
+
     const masterItems = await getInvoiceMasterItems(cleanInvoice);
+    const incomplete = await getIncompleteInvoice(cleanInvoice);
+
     const initialItems: Record<string, ScannedAuditItem> = {};
     const now = new Date().toISOString();
 
-    masterItems.forEach((m, idx) => {
-      initialItems[m.itemCode] = {
-        itemCode: m.itemCode,
-        itemName: m.itemName,
-        unit: m.unit,
-        requiredQty: m.requiredQty,
-        actualQty: 0,
-        codeStatus: 'MATCH',
-        qtyStatus: 'SHORTAGE',
-        lastScannedAt: now,
-        scanHistory: [],
-        originalIndex: m.originalIndex !== undefined ? m.originalIndex : idx,
-      };
-    });
+    if (incomplete && incomplete.session && incomplete.session.items) {
+      Object.assign(initialItems, incomplete.session.items);
+    } else {
+      masterItems.forEach((m, idx) => {
+        initialItems[m.itemCode] = {
+          itemCode: m.itemCode,
+          itemName: m.itemName,
+          unit: m.unit,
+          requiredQty: m.requiredQty,
+          actualQty: 0,
+          codeStatus: 'MATCH',
+          qtyStatus: 'SHORTAGE',
+          lastScannedAt: now,
+          scanHistory: [],
+          orderNo: m.orderNo,
+          originalIndex: m.originalIndex !== undefined ? m.originalIndex : idx,
+        };
+      });
+    }
+
+    const firstItemWithOrder = masterItems.find(m => Boolean(m.orderNo));
 
     const newSession: ActiveInvoiceSession = {
       invoiceNo: cleanInvoice,
-      startedAt: now,
+      orderNo: firstItemWithOrder?.orderNo || incomplete?.orderNo,
+      startedAt: incomplete?.session?.startedAt || now,
       lastActivityAt: now,
       items: initialItems,
       isLocked: true,
       lastScannedItemCode: null,
+      longBarcodePolicy: 'ASK',
     };
 
     await saveActiveSession(newSession);
@@ -204,6 +255,15 @@ export function App() {
     const cleanCode = code.trim();
     if (!cleanCode) return;
 
+    const threshold = settings.longBarcodeThreshold || 10;
+    const isLongBarcode = cleanCode.length > threshold;
+    const policy = currentSession.longBarcodePolicy || 'ASK';
+
+    if (isLongBarcode && policy === 'BLOCK') {
+      if (settings.soundEnabled) SoundEffects.playMismatchWarning(settings.soundVolume * 0.5);
+      return;
+    }
+
     const session = { ...currentSession };
     const items = { ...session.items };
     const now = new Date().toISOString();
@@ -213,7 +273,7 @@ export function App() {
     let resolvedItemCode = cleanCode;
 
     if (targetItem) {
-      // MATCH
+      // MATCH - ITEM BELONGS TO INVOICE
       resolvedItemCode = targetItem.itemCode;
       const newActualQty = targetItem.actualQty + 1;
       let newQtyStatus: 'EXACT' | 'SHORTAGE' | 'SURPLUS' = 'SHORTAGE';
@@ -239,32 +299,44 @@ export function App() {
         lastScannedAt: now,
         scanHistory: [...(targetItem.scanHistory || []), now],
       };
+
+      session.items = items;
+      session.lastActivityAt = now;
+      session.lastScannedItemCode = resolvedItemCode;
+
+      await saveActiveSession(session);
+      setActiveSession(session);
     } else {
-      // MISMATCH
+      // WRONG PICKING (تجهيز خاطئ) - Item does NOT belong to this invoice!
+      // Do NOT add to session.items! Divert directly to wrong_pickings table.
       if (settings.soundEnabled) SoundEffects.playMismatchWarning(settings.soundVolume);
       if (settings.vibrationEnabled) SoundEffects.vibrate([200, 100, 200, 100, 200]);
 
-      items[cleanCode] = {
+      const belonging = await findItemBelonging(cleanCode);
+
+      await saveWrongPicking({
+        activeInvoiceNo: session.invoiceNo,
+        orderNo: session.orderNo,
         itemCode: cleanCode,
-        itemName: `Unknown Item (${cleanCode})`,
-        unit: 'PCS',
-        requiredQty: 0,
-        actualQty: 1,
-        codeStatus: 'MISMATCH',
-        qtyStatus: 'SURPLUS',
-        lastScannedAt: now,
-        scanHistory: [now],
-        originalIndex: 9999 + Object.keys(items).length,
-      };
+        itemName: belonging?.itemName || 'Unknown Foreign Item',
+        unit: belonging?.unit || 'PCS',
+        actualBelongingInvoiceNo: belonging?.invoiceNo,
+        actualBelongingOrderNo: belonging?.orderNo,
+        scannedAt: now,
+        auditorName: settings.auditorName || 'Ahmed Hamada',
+        auditorId: settings.auditorId || 'AUD-101',
+        quantity: 1,
+        notes: belonging?.invoiceNo 
+          ? `Belongs to Invoice ${belonging.invoiceNo}${belonging.orderNo ? ` (Order: ${belonging.orderNo})` : ''}`
+          : 'Foreign Item not in master database',
+      });
+
+      session.lastActivityAt = now;
+      await saveActiveSession(session);
+      setActiveSession(session);
+      await refreshWrongPickings();
     }
-
-    session.items = items;
-    session.lastActivityAt = now;
-    session.lastScannedItemCode = resolvedItemCode;
-
-    await saveActiveSession(session);
-    setActiveSession(session);
-  }, [settings.soundEnabled, settings.soundVolume, settings.vibrationEnabled]);
+  }, [settings.longBarcodeThreshold, settings.soundEnabled, settings.soundVolume, settings.vibrationEnabled]);
 
   // Global Hardware 1D Barcode Scanner Keyboard-Wedge Listener
   const handleHardwareScan = useCallback(async (barcode: string) => {
@@ -351,17 +423,30 @@ export function App() {
         setCurrentTab={setCurrentTab}
         syncMeta={syncMeta}
         onOpenSyncModal={() => setIsSyncModalOpen(true)}
-        errorCount={discrepancies.length}
+        errorCount={discrepancies.length + wrongPickings.length}
+        wrongPickingCount={wrongPickings.length}
+        overdueLabCount={overdueLabCount}
+        pendingLabCount={pendingLabCount}
         settings={settings}
         onToggleSound={handleToggleSound}
         onToggleLanguage={handleToggleLanguage}
         isScannerActive={isScannerActive}
         canInstallPwa={Boolean(deferredInstallPrompt)}
         onInstallPwa={handleInstallPwa}
+        onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
       />
 
       {/* Main Screen Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5">
+        {/* 1. Inbound Receiving Screen */}
+        {currentTab === 'receiving' && (
+          <ReceivingScreen
+            settings={settings}
+            lastScannedCode={lastScannedBarcode}
+          />
+        )}
+
+        {/* 2. Invoice Dispatch Auditor Screen */}
         {currentTab === 'audit' && (
           <ActiveAuditScreen
             activeSession={activeSession}
@@ -374,13 +459,44 @@ export function App() {
           />
         )}
 
-        {currentTab === 'errors' && (
-          <ErrorReportScreen
-            discrepancies={discrepancies}
-            onRefreshDiscrepancies={refreshDiscrepancies}
+        {/* 3. Returns & Refunds (RMA) Screen with Smart PDF extraction */}
+        {currentTab === 'returns' && (
+          <ReturnsScreen
+            settings={settings}
+            lastScannedCode={lastScannedBarcode}
+            onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
           />
         )}
 
+        {/* 4. Cycle Count & Packaging Breakdown Screen */}
+        {currentTab === 'inventory' && (
+          <InventoryCountScreen
+            settings={settings}
+            lastScannedCode={lastScannedBarcode}
+          />
+        )}
+
+        {/* 5. Batch Wave Picking List Generator Screen */}
+        {currentTab === 'picking' && (
+          <PickingWaveScreen
+            settings={settings}
+            lastScannedCode={lastScannedBarcode}
+          />
+        )}
+
+        {/* Discrepancies & Discarded Wrong Pickings */}
+        {currentTab === 'errors' && (
+          <ErrorReportScreen
+            discrepancies={discrepancies}
+            wrongPickings={wrongPickings}
+            onRefreshDiscrepancies={refreshDiscrepancies}
+            onRefreshWrongPickings={refreshWrongPickings}
+            settings={settings}
+            onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
+          />
+        )}
+
+        {/* Master Database Screen */}
         {currentTab === 'master' && (
           <MasterDatabaseView
             syncMeta={syncMeta}
@@ -392,6 +508,7 @@ export function App() {
           />
         )}
 
+        {/* Scanner Simulator & Tools Screen */}
         {currentTab === 'settings' && (
           <ScannerSimulator
             settings={settings}
@@ -399,6 +516,9 @@ export function App() {
             onSimulateScan={handleHardwareScan}
             activeInvoiceNo={activeSession?.invoiceNo || null}
             masterItems={masterItemsList}
+            onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
+            canInstallPwa={Boolean(deferredInstallPrompt)}
+            onInstallPwa={handleInstallPwa}
           />
         )}
       </main>
@@ -414,6 +534,14 @@ export function App() {
         }}
       />
 
+      {/* Auditor Profile & Digital Signature Modal (ISA 500 Evidence Compliance) */}
+      <AuditorSignatureModal
+        isOpen={isAuditorModalOpen}
+        onClose={() => setIsAuditorModalOpen(false)}
+        settings={settings}
+        onSaveSettings={handleUpdateSettings}
+      />
+
       {/* Invoice Evaluation & Switch Summary Modal */}
       <InvoiceSummaryModal
         isOpen={summaryModalState.isOpen}
@@ -424,6 +552,9 @@ export function App() {
         totalRequiredQty={summaryModalState.totalRequiredQty}
         totalScannedQty={summaryModalState.totalScannedQty}
         totalLineItems={summaryModalState.totalLineItems}
+        auditorName={settings.auditorName}
+        auditorId={settings.auditorId}
+        auditorSignature={settings.auditorSignature}
         language={settings.language}
         onViewErrorReport={() => {
           setSummaryModalState(prev => ({ ...prev, isOpen: false }));

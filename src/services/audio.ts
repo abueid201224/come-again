@@ -216,6 +216,33 @@ export const SoundEffects = {
     }
   },
 
+  // Alert when scanning a long barcode (> 10 digits) requiring decision
+  playLongBarcodeAlert(volume = 0.8) {
+    try {
+      const ctx = getAudioContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(440, now); // A4
+      osc.frequency.setValueAtTime(659.25, now + 0.12); // E5
+      osc.frequency.setValueAtTime(440, now + 0.24); // A4
+
+      gain.gain.setValueAtTime(volume * 0.5, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(now);
+      osc.stop(now + 0.38);
+    } catch {
+      // Audio playback fails gracefully
+    }
+  },
+
   // Trigger vibration if supported on device
   vibrate(pattern: number | number[]) {
     if (typeof window !== 'undefined' && 'vibrate' in navigator) {

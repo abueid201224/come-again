@@ -5,12 +5,14 @@ import {
   Trash2, 
   Archive, 
   ArrowRight, 
-  X,
-  FileCheck2,
-  Package,
-  Layers,
-  Sparkles,
-  Clock
+  X, 
+  FileCheck2, 
+  Package, 
+  Layers, 
+  Sparkles, 
+  Clock,
+  ShieldCheck,
+  UserCheck
 } from 'lucide-react';
 import type { AuditDiscrepancy } from '../types';
 
@@ -24,6 +26,9 @@ interface InvoiceSummaryModalProps {
   totalRequiredQty?: number;
   totalScannedQty?: number;
   totalLineItems?: number;
+  auditorName?: string;
+  auditorId?: string;
+  auditorSignature?: string;
   onViewErrorReport: () => void;
   onContinueScanning: () => void;
   language?: 'ar' | 'en';
@@ -39,6 +44,9 @@ export const InvoiceSummaryModal: React.FC<InvoiceSummaryModalProps> = ({
   totalRequiredQty = 0,
   totalScannedQty = 0,
   totalLineItems = 0,
+  auditorName,
+  auditorId,
+  auditorSignature,
   onViewErrorReport,
   onContinueScanning,
   language = 'ar',
@@ -88,7 +96,7 @@ export const InvoiceSummaryModal: React.FC<InvoiceSummaryModalProps> = ({
         </div>
 
         {/* Prominent High-Contrast Metrics (Total Quantity & Items Count) */}
-        <div className="p-6 space-y-5">
+        <div className="p-6 space-y-4">
           {/* Main KPI Card */}
           <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 shadow-inner">
             <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
@@ -164,6 +172,29 @@ export const InvoiceSummaryModal: React.FC<InvoiceSummaryModalProps> = ({
             </div>
           </div>
 
+          {/* Auditor Sign-off Seal Badge */}
+          <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0" />
+              <div>
+                <span className="text-xs font-bold text-slate-200 block">
+                  {isRtl ? 'المراجع المعتمد:' : 'Certified Auditor:'} <strong className="text-emerald-300">{auditorName || 'أحمد حمادة'}</strong> ({auditorId || 'AUD-101'})
+                </span>
+                <span className="text-[11px] text-slate-400 font-mono">
+                  {new Date().toLocaleString(isRtl ? 'ar-EG' : 'en-US', { dateStyle: 'short', timeStyle: 'short' })}
+                </span>
+              </div>
+            </div>
+
+            {auditorSignature && auditorSignature.startsWith('data:image/') && (
+              <img 
+                src={auditorSignature} 
+                alt="Auditor Stamp" 
+                className="h-8 max-w-[100px] object-contain rounded border border-slate-800 bg-slate-900 px-1"
+              />
+            )}
+          </div>
+
           {/* Breakdown List if errors exist */}
           {archivedDiscrepancies.length > 0 && (
             <div className="space-y-2">
@@ -171,7 +202,7 @@ export const InvoiceSummaryModal: React.FC<InvoiceSummaryModalProps> = ({
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
                 <span>{isRtl ? 'تفاصيل الانحرافات المسجلة:' : 'Archived Error Details:'}</span>
               </h3>
-              <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+              <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1">
                 {archivedDiscrepancies.map((disc, idx) => (
                   <div 
                     key={idx} 

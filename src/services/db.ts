@@ -2,12 +2,20 @@ import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type { 
   MasterInvoiceItem, 
   AuditDiscrepancy, 
+  WrongPickingItem,
   InvoiceAuditHistory, 
   ActiveInvoiceSession, 
   SyncMetadata,
   AppSettings,
   IncompleteInvoiceRecord,
-  CompletedInvoiceRecord
+  CompletedInvoiceRecord,
+  ReturnReport,
+  WarehouseWorker,
+  BatchPickingWave,
+  PickingProductGroup,
+  AggregatedPickingItem,
+  WorkerExperienceLevel,
+  GroupDifficultyLevel
 } from '../types';
 
 interface InvoiceAuditorDB extends DBSchema {
@@ -32,6 +40,16 @@ interface InvoiceAuditorDB extends DBSchema {
       'by-qty-status': string;
     };
   };
+  wrong_pickings: {
+    key: number;
+    value: WrongPickingItem;
+    indexes: {
+      'by-active-invoice': string;
+      'by-order': string;
+      'by-item-code': string;
+      'by-date': string;
+    };
+  };
   audit_history: {
     key: number;
     value: InvoiceAuditHistory;
@@ -48,7 +66,7 @@ interface InvoiceAuditorDB extends DBSchema {
 }
 
 const DB_NAME = 'OfflineInvoiceAuditorDB';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 let dbPromise: Promise<IDBPDatabase<InvoiceAuditorDB>> | null = null;
 
@@ -93,7 +111,20 @@ export function getDB(): Promise<IDBPDatabase<InvoiceAuditorDB>> {
           }
         }
 
-        // 3. Audit History Store
+        // 3. Wrong Pickings Store (Items scanned that do NOT belong to active invoice)
+        let wrongStore: any;
+        if (!db.objectStoreNames.contains('wrong_pickings')) {
+          wrongStore = db.createObjectStore('wrong_pickings', {
+            keyPath: 'id',
+            autoIncrement: true,
+          });
+          wrongStore.createIndex('by-active-invoice', 'activeInvoiceNo');
+          wrongStore.createIndex('by-order', 'orderNo');
+          wrongStore.createIndex('by-item-code', 'itemCode');
+          wrongStore.createIndex('by-date', 'scannedAt');
+        }
+
+        // 4. Audit History Store
         let historyStore: any;
         if (!db.objectStoreNames.contains('audit_history')) {
           historyStore = db.createObjectStore('audit_history', {
@@ -110,7 +141,7 @@ export function getDB(): Promise<IDBPDatabase<InvoiceAuditorDB>> {
           }
         }
 
-        // 4. Key Value Store
+        // 5. Key Value Store
         if (!db.objectStoreNames.contains('key_value')) {
           db.createObjectStore('key_value');
         }
@@ -379,6 +410,59 @@ export async function deleteAuditDiscrepancy(id: number): Promise<void> {
   await db.delete('audit_errors', id);
 }
 
+// Wrong Pickings Operations (Items scanned that do NOT belong to active invoice)
+export async function saveWrongPicking(record: Omit<WrongPickingItem, 'id'>): Promise<number> {
+  const db = await getDB();
+  return db.add('wrong_pickings', record as WrongPickingItem);
+}
+
+export async function getAllWrongPickings(): Promise<WrongPickingItem[]> {
+  const db = await getDB();
+  const all = await db.getAll('wrong_pickings');
+  return all.sort((a, b) => new Date(b.scannedAt).getTime() - new Date(a.scannedAt).getTime());
+}
+
+export async function getWrongPickingsByInvoice(invoiceNo: string): Promise<WrongPickingItem[]> {
+  const db = await getDB();
+  const clean = invoiceNo.trim().toLowerCase();
+  const all = await db.getAll('wrong_pickings');
+  return all.filter(item => item.activeInvoiceNo.toLowerCase() === clean);
+}
+
+export async function clearAllWrongPickings(): Promise<void> {
+  const db = await getDB();
+  await db.clear('wrong_pickings');
+}
+
+export async function deleteWrongPicking(id: number): Promise<void> {
+  const db = await getDB();
+  await db.delete('wrong_pickings', id);
+}
+
+// Helper to look up if a scanned barcode belongs to ANY invoice in master database
+export async function findItemBelonging(barcode: string): Promise<{
+  invoiceNo: string;
+  orderNo?: string;
+  itemName: string;
+  unit: string;
+  requiredQty: number;
+} | null> {
+  const db = await getDB();
+  const clean = barcode.trim().toLowerCase();
+  const allMaster = await db.getAll('master_items');
+  
+  const found = allMaster.find(m => m.itemCode.toLowerCase() === clean);
+  if (!found) return null;
+
+  return {
+    invoiceNo: found.invoiceNo,
+    orderNo: found.orderNo,
+    itemName: found.itemName,
+    unit: found.unit,
+    requiredQty: found.requiredQty,
+  };
+}
+
 // Audit History Operations
 export async function saveAuditHistory(history: InvoiceAuditHistory): Promise<void> {
   const db = await getDB();
@@ -402,6 +486,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoSwitchOnNewInvoice: true,
   itemSortMode: 'LAST_SCANNED',
   enableCameraQr: true,
+  longBarcodeThreshold: 10,
+  auditorName: 'أحمد حمادة',
+  auditorId: 'AUD-101',
+  auditorTitle: 'مدير ومراقب عمليات المستودع',
 };
 
 export async function getAppSettings(): Promise<AppSettings> {
@@ -414,3 +502,344 @@ export async function saveAppSettings(settings: AppSettings): Promise<void> {
   const db = await getDB();
   await db.put('key_value', settings, 'app_settings');
 }
+
+// -------------------------------------------------------------------
+// Packaging Grouping Rules (قائمة شروط ضم المنتجات في مجموعات متشابهة)
+// -------------------------------------------------------------------
+export const DEFAULT_PACKAGING_RULES = [
+  {
+    id: 'grp-rule-1',
+    name: 'مجموعة المشروبات والعصائر (كرتون 24 / باكت 6)',
+    startBarcode: '6221000100',
+    endBarcode: '6221000999',
+    category: 'مشروبات',
+    cartonFactor: 24,
+    packFactor: 6,
+    unitName: 'حبة',
+    isActive: true,
+    notes: 'تضم كافة أحجام العصائر الصغيرة 250 مل',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'grp-rule-2',
+    name: 'مجموعة المنظفات والمعقمات (كرتون 12 / باكت 4)',
+    startBarcode: '6222000100',
+    endBarcode: '6222000999',
+    category: 'منظفات',
+    cartonFactor: 12,
+    packFactor: 4,
+    unitName: 'عبوة',
+    isActive: true,
+    notes: 'العبوات العائلية 1 لتر',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'grp-rule-3',
+    name: 'مجموعة المعلبات والأغذية الجافة (كرتون 48 / باكت 12)',
+    startBarcode: '8901234500',
+    endBarcode: '8901234599',
+    category: 'أغذية',
+    cartonFactor: 48,
+    packFactor: 12,
+    unitName: 'علبة',
+    isActive: true,
+    notes: 'علب التونة والبقوليات القياسية',
+    createdAt: new Date().toISOString(),
+  }
+];
+
+export async function getPackagingGroupRules(): Promise<any[]> {
+  const db = await getDB();
+  const rules = await db.get('key_value', 'packaging_group_rules');
+  return (rules as any[]) || DEFAULT_PACKAGING_RULES;
+}
+
+export async function savePackagingGroupRules(rules: any[]): Promise<void> {
+  const db = await getDB();
+  await db.put('key_value', rules, 'packaging_group_rules');
+}
+
+/**
+ * Matches a scanned or imported barcode against active grouping rules
+ */
+export function matchBarcodeToPackagingRule(barcode: string, rules: any[]): any | null {
+  const clean = barcode.trim();
+  if (!clean) return null;
+
+  for (const rule of rules) {
+    if (!rule.isActive) continue;
+    
+    // Check if barcode falls lexicographically or numerically within startBarcode and endBarcode
+    const start = String(rule.startBarcode || '').trim();
+    const end = String(rule.endBarcode || '').trim();
+
+    if (start && end) {
+      if (/^\d+$/.test(clean) && /^\d+$/.test(start) && /^\d+$/.test(end)) {
+        const numVal = BigInt(clean);
+        const numStart = BigInt(start);
+        const numEnd = BigInt(end);
+        if (numVal >= numStart && numVal <= numEnd) {
+          return rule;
+        }
+      } else {
+        if (clean >= start && clean <= end) {
+          return rule;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Searches for a packaging group rule by group barcode (e.g. GRP-1, rule ID, start/end barcode, or product barcode)
+ */
+export function findPackagingRuleByGroupScan(scanCode: string, rules: any[]): any | null {
+  const clean = scanCode.trim().toLowerCase();
+  if (!clean) return null;
+
+  // 1. Check exact ID or prefix
+  const byId = rules.find(r => 
+    r.id?.toLowerCase() === clean || 
+    clean === `grp-${r.id?.toLowerCase()}` ||
+    clean === `group-${r.id?.toLowerCase()}`
+  );
+  if (byId) return byId;
+
+  // 2. Check rule start/end barcode
+  const byBoundary = rules.find(r => 
+    String(r.startBarcode || '').trim() === scanCode.trim() ||
+    String(r.endBarcode || '').trim() === scanCode.trim()
+  );
+  if (byBoundary) return byBoundary;
+
+  // 3. Check rule name or category match
+  const byName = rules.find(r => 
+    r.name?.toLowerCase().includes(clean) || 
+    (r.category && r.category.toLowerCase() === clean)
+  );
+  if (byName) return byName;
+
+  // 4. Fallback to range match
+  return matchBarcodeToPackagingRule(scanCode, rules);
+}
+
+// -------------------------------------------------------------------
+// Returns & Quality Inspection & Refund Reports Operations
+// -------------------------------------------------------------------
+export async function getAllReturnReports(): Promise<ReturnReport[]> {
+  const db = await getDB();
+  const list = (await db.get('key_value', 'saved_return_reports')) as ReturnReport[] || [];
+  
+  // Calculate overdue status (> 24 hours / 1 business day) dynamically
+  const now = Date.now();
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+  return list.map(r => {
+    const createdTime = new Date(r.createdAt).getTime();
+    const isOverdue = r.status === 'PENDING_LAB' && (now - createdTime >= ONE_DAY_MS);
+    return {
+      ...r,
+      returnReceiptNo: r.returnReceiptNo || r.rmaNo || `RET-${r.id.slice(-6)}`,
+      paymentMethod: r.paymentMethod || 'CASH',
+      isOverdueForLab: isOverdue,
+    };
+  });
+}
+
+export async function getOverdueLabReportsCount(): Promise<number> {
+  const all = await getAllReturnReports();
+  return all.filter(r => r.isOverdueForLab).length;
+}
+
+export async function saveReturnReport(report: ReturnReport): Promise<void> {
+  const db = await getDB();
+  const current = (await db.get('key_value', 'saved_return_reports') as ReturnReport[]) || [];
+  const receiptNo = report.returnReceiptNo || report.rmaNo || `RET-${Date.now()}`;
+  
+  const sanitizedReport: ReturnReport = {
+    ...report,
+    returnReceiptNo: receiptNo,
+    rmaNo: receiptNo,
+  };
+
+  const filtered = current.filter(r => r.id !== sanitizedReport.id && (r.returnReceiptNo !== receiptNo && r.rmaNo !== receiptNo));
+  filtered.unshift(sanitizedReport);
+  await db.put('key_value', filtered, 'saved_return_reports');
+}
+
+export async function deleteReturnReport(id: string): Promise<void> {
+  const db = await getDB();
+  const current = (await db.get('key_value', 'saved_return_reports') as ReturnReport[]) || [];
+  const filtered = current.filter(r => r.id !== id);
+  await db.put('key_value', filtered, 'saved_return_reports');
+}
+
+// -------------------------------------------------------------------
+// Inbound Receiving Reports Operations (سجلات الاستلام والتوريدات)
+// -------------------------------------------------------------------
+export async function getAllReceivingReports(): Promise<any[]> {
+  const db = await getDB();
+  const list = await db.get('key_value', 'saved_receiving_reports');
+  return (list as any[]) || [];
+}
+
+export async function saveReceivingReport(report: any): Promise<void> {
+  const db = await getDB();
+  const current = (await db.get('key_value', 'saved_receiving_reports') as any[]) || [];
+  const filtered = current.filter(r => r.id !== report.id && r.poNumber !== report.poNumber);
+  filtered.unshift(report);
+  await db.put('key_value', filtered, 'saved_receiving_reports');
+}
+
+export async function deleteReceivingReport(id: string): Promise<void> {
+  const db = await getDB();
+  const current = (await db.get('key_value', 'saved_receiving_reports') as any[]) || [];
+  const filtered = current.filter(r => r.id !== id);
+  await db.put('key_value', filtered, 'saved_receiving_reports');
+}
+
+// -------------------------------------------------------------------
+// Cycle Count & Inventory Reports Operations (سجلات الجرد وتجميع العبوات)
+// -------------------------------------------------------------------
+export async function getAllInventoryReports(): Promise<any[]> {
+  const db = await getDB();
+  const list = await db.get('key_value', 'saved_inventory_reports');
+  return (list as any[]) || [];
+}
+
+export async function saveInventoryReport(report: any): Promise<void> {
+  const db = await getDB();
+  const current = (await db.get('key_value', 'saved_inventory_reports') as any[]) || [];
+  const filtered = current.filter(r => r.id !== report.id);
+  filtered.unshift(report);
+  await db.put('key_value', filtered, 'saved_inventory_reports');
+}
+
+export async function deleteInventoryReport(id: string): Promise<void> {
+  const db = await getDB();
+  const current = (await db.get('key_value', 'saved_inventory_reports') as any[]) || [];
+  const filtered = current.filter(r => r.id !== id);
+  await db.put('key_value', filtered, 'saved_inventory_reports');
+}
+
+// -------------------------------------------------------------------
+// Warehouse Workers & Experience Management (إدارة عمال التجهيز والمستودع)
+// -------------------------------------------------------------------
+export const DEFAULT_WAREHOUSE_WORKERS: WarehouseWorker[] = [
+  {
+    id: 'worker-1',
+    name: 'أحمد إبراهيم (خبير تجهيز)',
+    code: 'EMP-EXP-101',
+    experienceLevel: 'EXPERT',
+    isActive: true,
+    specialty: 'المنتجات الحساسة، الأدوية، والزجاجيات والأصناف المعقدة',
+    phone: '0501234567',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'worker-2',
+    name: 'محمود عبد الرحمن (خبير تجهيز)',
+    code: 'EMP-EXP-102',
+    experienceLevel: 'EXPERT',
+    isActive: true,
+    specialty: 'الأصناف المتشابهة بالباركود وذات الدقة العالية',
+    phone: '0502345678',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'worker-3',
+    name: 'سالم الدوسري (متوسط الخبرة)',
+    code: 'EMP-MED-201',
+    experienceLevel: 'INTERMEDIATE',
+    isActive: true,
+    specialty: 'المواد الغذائية، العبوات المتوسطة، والمشروبات',
+    phone: '0503456789',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'worker-4',
+    name: 'طارق العلي (متوسط الخبرة)',
+    code: 'EMP-MED-202',
+    experienceLevel: 'INTERMEDIATE',
+    isActive: true,
+    specialty: 'المنظفات والعبوات الاستهلاكية والتجهيز العادي',
+    phone: '0504567890',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'worker-5',
+    name: 'عمر خالد (مبتدئ / تجهيز سريع)',
+    code: 'EMP-NOV-301',
+    experienceLevel: 'NOVICE',
+    isActive: true,
+    specialty: 'الكراتين الكاملة، الأصناف الضخمة، والمنتجات السهلة',
+    phone: '0505678901',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'worker-6',
+    name: 'فهد المنصور (مبتدئ / تجهيز سريع)',
+    code: 'EMP-NOV-302',
+    experienceLevel: 'NOVICE',
+    isActive: true,
+    specialty: 'الأصناف الفردية السريعة والكراتين المقفلة',
+    phone: '0506789012',
+    createdAt: new Date().toISOString(),
+  }
+];
+
+export async function getWarehouseWorkers(): Promise<WarehouseWorker[]> {
+  const db = await getDB();
+  const list = await db.get('key_value', 'warehouse_workers');
+  return (list as WarehouseWorker[]) || DEFAULT_WAREHOUSE_WORKERS;
+}
+
+export async function saveWarehouseWorkers(workers: WarehouseWorker[]): Promise<void> {
+  const db = await getDB();
+  await db.put('key_value', workers, 'warehouse_workers');
+}
+
+export async function addWarehouseWorker(worker: WarehouseWorker): Promise<void> {
+  const workers = await getWarehouseWorkers();
+  const filtered = workers.filter(w => w.id !== worker.id && w.code !== worker.code);
+  filtered.push(worker);
+  await saveWarehouseWorkers(filtered);
+}
+
+export async function updateWarehouseWorker(worker: WarehouseWorker): Promise<void> {
+  const workers = await getWarehouseWorkers();
+  const updated = workers.map(w => w.id === worker.id ? worker : w);
+  await saveWarehouseWorkers(updated);
+}
+
+export async function deleteWarehouseWorker(id: string): Promise<void> {
+  const workers = await getWarehouseWorkers();
+  const filtered = workers.filter(w => w.id !== id);
+  await saveWarehouseWorkers(filtered);
+}
+
+// -------------------------------------------------------------------
+// Batch Picking Waves Operations (قوائم التقاط الفواتير المجمعة)
+// -------------------------------------------------------------------
+export async function getAllPickingWaves(): Promise<BatchPickingWave[]> {
+  const db = await getDB();
+  const list = await db.get('key_value', 'saved_picking_waves');
+  return (list as BatchPickingWave[]) || [];
+}
+
+export async function savePickingWave(wave: BatchPickingWave): Promise<void> {
+  const db = await getDB();
+  const current = (await db.get('key_value', 'saved_picking_waves') as BatchPickingWave[]) || [];
+  const filtered = current.filter(w => w.id !== wave.id && w.waveNo !== wave.waveNo);
+  filtered.unshift(wave);
+  await db.put('key_value', filtered, 'saved_picking_waves');
+}
+
+export async function deletePickingWave(id: string): Promise<void> {
+  const db = await getDB();
+  const current = (await db.get('key_value', 'saved_picking_waves') as BatchPickingWave[]) || [];
+  const filtered = current.filter(w => w.id !== id);
+  await db.put('key_value', filtered, 'saved_picking_waves');
+}
+

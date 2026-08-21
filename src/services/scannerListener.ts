@@ -68,11 +68,6 @@ export function useScannerListener({
 
       // Detect Enter key = scanner transmission terminator
       if (e.key === 'Enter') {
-        // If focused in dedicated scanner input, prevent default form submit
-        if (isScannerDedicatedInput) {
-          e.preventDefault();
-        }
-
         const currentBuffer = bufferRef.current;
         const total = totalKeyCountRef.current;
         const fast = fastKeyCountRef.current;
@@ -87,9 +82,14 @@ export function useScannerListener({
           clearTimerRef.current = null;
         }
 
+        // If focused in dedicated scanner input in ActiveAuditScreen, let the form onSubmit handle it directly
+        if (isScannerDedicatedInput) {
+          return;
+        }
+
         if (currentBuffer.trim().length >= minLength) {
-          // If scanner scanned into an unrelated input, we prevent it from adding newline
-          if (isFastWedge && !isScannerDedicatedInput && isInput) {
+          // If scanner scanned into an unrelated input, prevent newline
+          if (isInput) {
             e.preventDefault();
           }
           handleScanTrigger(currentBuffer, isFastWedge);
