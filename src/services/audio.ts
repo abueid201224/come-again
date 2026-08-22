@@ -155,6 +155,32 @@ export const SoundEffects = {
     }
   },
 
+  // Document Re-open / Unlock tone
+  playInvoiceUnlock(volume = 0.8) {
+    try {
+      const ctx = getAudioContext();
+      if (!ctx) return;
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, now); // A5
+      osc.frequency.exponentialRampToValueAtTime(587.33, now + 0.15); // D5
+
+      gain.gain.setValueAtTime(volume * 0.4, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(now);
+      osc.stop(now + 0.2);
+    } catch {
+      // Audio playback fails gracefully
+    }
+  },
+
   // Alert when attempting to scan an already completed and closed invoice
   playAlreadyCompletedBlocked(volume = 0.8) {
     try {

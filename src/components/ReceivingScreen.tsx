@@ -4,6 +4,7 @@ import {
   FileSpreadsheet,
   Upload,
   Plus,
+  Minus,
   Trash2,
   CheckCircle2,
   AlertTriangle,
@@ -17,9 +18,21 @@ import {
   ArrowDownToLine,
   FileCheck,
   Boxes,
-  Sliders
+  Sliders,
+  Pin,
+  Lock,
+  Unlock,
+  Eye,
+  X
 } from 'lucide-react';
-import type { AppSettings, ReceivingReport, ReceivingSessionItem, PackagingGroupRule } from '../types';
+import type { 
+  AppSettings, 
+  ReceivingReport, 
+  ReceivingSessionItem, 
+  PackagingGroupRule, 
+  ActiveTargetColumn,
+  DocumentReopenPrompt 
+} from '../types';
 import {
   parseExcelReceivingFile,
   downloadReceivingExcelTemplate,
@@ -36,6 +49,7 @@ import {
 } from '../services/db';
 import { SoundEffects } from '../services/audio';
 import { PackagingRulesModal } from './PackagingRulesModal';
+import { ReopenConfirmationModal } from './ReopenConfirmationModal';
 
 interface ReceivingScreenProps {
   settings: AppSettings;
@@ -60,6 +74,13 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
   const [packagingRules, setPackagingRules] = useState<PackagingGroupRule[]>([]);
   const [isRulesModalOpen, setIsRulesModalOpen] = useState(false);
 
+  // Touch column header locking state
+  const [activeTargetColumn, setActiveTargetColumn] = useState<ActiveTargetColumn>('pieces');
+
+  // Re-open security prompt and read-only preview modal states
+  const [reopenPrompt, setReopenPrompt] = useState<DocumentReopenPrompt | null>(null);
+  const [viewingReport, setViewingReport] = useState<ReceivingReport | null>(null);
+
   useEffect(() => {
     loadSavedReports();
     loadPackagingRules();
@@ -75,9 +96,23 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
     setPackagingRules(rules);
   };
 
-  // Hardware Scanner Integration
+  // Helper to get packaging factors
+  const resolveFactors = (barcode: string, currentRules: PackagingGroupRule[]) => {
+    const matchedRule = matchBarcodeToPackagingRule(barcode, currentRules);
+    return {
+      cartonFactor: matchedRule?.cartonFactor || 24,
+      packFactor: matchedRule?.packFactor || 6,
+    };
+  };
+
+  // Calculate total received from packaging columns
+  const computeTotalReceived = (cartons: number, cartonFactor: number, packs: number, packFactor: number, pieces: number) => {
+    return (cartons * (cartonFactor || 1)) + (packs * (packFactor || 1)) + pieces;
+  };
+
+  // Hardware Scanner Integration with activeTargetColumn routing
   useEffect(() => {
-    if (!lastScannedCode) return;
+    if (!lastScannedCode || activeTab !== 'receiving') return;
     const clean = lastScannedCode.trim();
     if (!clean) return;
 
@@ -86,31 +121,68 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
       if (idx !== -1) {
         const updated = [...prev];
         const cur = updated[idx];
-        const nextRec = cur.receivedQty + 1;
+        const cFactor = cur.cartonFactor || 24;
+        const pFactor = cur.packFactor || 6;
+
+        let nextCartons = cur.cartonsCount || 0;
+        let nextPacks = cur.packsCount || 0;
+        let nextPieces = cur.piecesCount || 0;
+
+        if (activeTargetColumn === 'cartons') {
+          nextCartons += 1;
+        } else if (activeTargetColumn === 'packs') {
+          nextPacks += 1;
+        } else {
+          nextPieces += 1;
+        }
+
+        const nextRec = computeTotalReceived(nextCartons, cFactor, nextPacks, pFactor, nextPieces);
+
         updated[idx] = {
           ...cur,
+          cartonsCount: nextCartons,
+          packsCount: nextPacks,
+          piecesCount: nextPieces,
           receivedQty: nextRec,
           status: nextRec === cur.expectedQty ? 'EXACT' : nextRec < cur.expectedQty ? 'SHORTAGE' : 'SURPLUS',
         };
+
         if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
         return updated;
       } else {
+        const factors = resolveFactors(clean, packagingRules);
+        let initCartons = 0;
+        let initPacks = 0;
+        let initPieces = 0;
+
+        if (activeTargetColumn === 'cartons') initCartons = 1;
+        else if (activeTargetColumn === 'packs') initPacks = 1;
+        else initPieces = 1;
+
+        const nextRec = computeTotalReceived(initCartons, factors.cartonFactor, initPacks, factors.packFactor, initPieces);
+
         const newItem: ReceivingSessionItem = {
           id: `rec-item-${Date.now()}`,
           itemCode: clean,
           itemName: `صنف وارد جديد ${clean}`,
           unit: 'PCS',
           expectedQty: 1,
-          receivedQty: 1,
+          receivedQty: nextRec,
           damagedQty: 0,
-          status: 'EXACT',
-          notes: 'صنف وارد لم يكن مسجلاً بأمر الشراء',
+          cartonFactor: factors.cartonFactor,
+          packFactor: factors.packFactor,
+          cartonsCount: initCartons,
+          packsCount: initPacks,
+          piecesCount: initPieces,
+          status: nextRec === 1 ? 'EXACT' : nextRec < 1 ? 'SHORTAGE' : 'SURPLUS',
+          notes: 'صنف وارد إضافي تم مسحه بالباركود',
         };
+
         if (settings.soundEnabled) SoundEffects.playMismatchWarning(settings.soundVolume);
         return [newItem, ...prev];
       }
     });
-  }, [lastScannedCode, settings.soundEnabled, settings.soundVolume]);
+  }, [lastScannedCode, activeTargetColumn, packagingRules, activeTab, settings.soundEnabled, settings.soundVolume]);
 
   // Import Excel PO (Primary & Default)
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -124,18 +196,27 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
         if (parsed.supplierName) setSupplierName(parsed.supplierName);
         if (parsed.deliveryNoteNo) setDeliveryNoteNo(parsed.deliveryNoteNo);
 
-        const mapped: ReceivingSessionItem[] = parsed.items.map((item, idx) => ({
-          id: `rec-${idx}-${Date.now()}`,
-          itemCode: item.itemCode,
-          itemName: item.itemName,
-          unit: item.unit,
-          expectedQty: item.expectedQty,
-          receivedQty: 0,
-          damagedQty: 0,
-          batchNumber: item.batchNumber,
-          expiryDate: item.expiryDate,
-          status: 'SHORTAGE',
-        }));
+        const mapped: ReceivingSessionItem[] = parsed.items.map((item, idx) => {
+          const factors = resolveFactors(item.itemCode, packagingRules);
+          return {
+            id: `rec-${idx}-${Date.now()}`,
+            itemCode: item.itemCode,
+            itemName: item.itemName,
+            unit: item.unit,
+            expectedQty: item.expectedQty,
+            receivedQty: 0,
+            damagedQty: 0,
+            cartonFactor: factors.cartonFactor,
+            packFactor: factors.packFactor,
+            cartonsCount: 0,
+            packsCount: 0,
+            piecesCount: 0,
+            batchNumber: item.batchNumber,
+            expiryDate: item.expiryDate,
+            status: 'SHORTAGE',
+          };
+        });
+
         setItems(mapped);
         setImportNotice(`تم استيراد ${mapped.length} صنف بنجاح من ملف الإكسيل (${file.name})`);
         if (settings.soundEnabled) SoundEffects.playExactComplete(settings.soundVolume);
@@ -160,16 +241,25 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
       if (extracted.documentNo) setPoNumber(extracted.documentNo);
       if (extracted.customerName) setSupplierName(extracted.customerName);
 
-      const mapped: ReceivingSessionItem[] = extracted.items.map((item, idx) => ({
-        id: `rec-pdf-${idx}-${Date.now()}`,
-        itemCode: item.itemCode,
-        itemName: item.itemName,
-        unit: item.unit,
-        expectedQty: item.quantity,
-        receivedQty: 0,
-        damagedQty: 0,
-        status: 'SHORTAGE',
-      }));
+      const mapped: ReceivingSessionItem[] = extracted.items.map((item, idx) => {
+        const factors = resolveFactors(item.itemCode, packagingRules);
+        return {
+          id: `rec-pdf-${idx}-${Date.now()}`,
+          itemCode: item.itemCode,
+          itemName: item.itemName,
+          unit: item.unit,
+          expectedQty: item.quantity,
+          receivedQty: 0,
+          damagedQty: 0,
+          cartonFactor: factors.cartonFactor,
+          packFactor: factors.packFactor,
+          cartonsCount: 0,
+          packsCount: 0,
+          piecesCount: 0,
+          status: 'SHORTAGE',
+        };
+      });
+
       setItems(mapped);
       setImportNotice(`تم استيراد ${mapped.length} صنف بنجاح من مستند PDF (${file.name})`);
       if (settings.soundEnabled) SoundEffects.playExactComplete(settings.soundVolume);
@@ -181,11 +271,22 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
     }
   };
 
-  // Direct edit of item field
+  // Direct manual update of item packaging or fields
   const handleUpdateItem = (id: string, updates: Partial<ReceivingSessionItem>) => {
     setItems(prev => prev.map(item => {
       if (item.id === id) {
         const merged = { ...item, ...updates };
+        const cFactor = merged.cartonFactor || 24;
+        const pFactor = merged.packFactor || 6;
+        const cCount = merged.cartonsCount || 0;
+        const pCount = merged.packsCount || 0;
+        const loose = merged.piecesCount || 0;
+
+        // If packaging columns updated, recompute receivedQty
+        if (updates.cartonsCount !== undefined || updates.packsCount !== undefined || updates.piecesCount !== undefined || updates.cartonFactor !== undefined || updates.packFactor !== undefined) {
+          merged.receivedQty = computeTotalReceived(cCount, cFactor, pCount, pFactor, loose);
+        }
+
         merged.status = merged.receivedQty === merged.expectedQty ? 'EXACT' : merged.receivedQty < merged.expectedQty ? 'SHORTAGE' : 'SURPLUS';
         return merged;
       }
@@ -195,22 +296,42 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
 
   // Add Manual Item
   const handleAddManual = () => {
-    if (!manualBarcode.trim()) return;
+    const clean = manualBarcode.trim();
+    if (!clean) return;
+
+    const factors = resolveFactors(clean, packagingRules);
+    let initCartons = 0;
+    let initPacks = 0;
+    let initPieces = 0;
+
+    if (activeTargetColumn === 'cartons') initCartons = 1;
+    else if (activeTargetColumn === 'packs') initPacks = 1;
+    else initPieces = 1;
+
+    const recQty = computeTotalReceived(initCartons, factors.cartonFactor, initPacks, factors.packFactor, initPieces);
+
     const newItem: ReceivingSessionItem = {
       id: `manual-rec-${Date.now()}`,
-      itemCode: manualBarcode.trim(),
-      itemName: `صنف استلام ${manualBarcode.trim()}`,
+      itemCode: clean,
+      itemName: `صنف استلام ${clean}`,
       unit: 'PCS',
       expectedQty: 1,
-      receivedQty: 1,
+      receivedQty: recQty,
       damagedQty: 0,
-      status: 'EXACT',
+      cartonFactor: factors.cartonFactor,
+      packFactor: factors.packFactor,
+      cartonsCount: initCartons,
+      packsCount: initPacks,
+      piecesCount: initPieces,
+      status: recQty === 1 ? 'EXACT' : recQty < 1 ? 'SHORTAGE' : 'SURPLUS',
     };
+
     setItems(prev => [newItem, ...prev]);
     setManualBarcode('');
+    if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
   };
 
-  // Save Receiving Report
+  // Save Receiving Report (Locks document)
   const handleSaveReport = async () => {
     if (items.length === 0) {
       alert('لا توجد أصناف في بيان الاستلام لحفظه.');
@@ -239,12 +360,40 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
 
     await saveReceivingReport(report);
     await loadSavedReports();
-    alert(`تم حفظ إذن الاستلام بنجاح (${poNumber})`);
+    if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
+    alert(`تم اعتماد وقفل إذن الاستلام بنجاح (${poNumber})`);
+  };
+
+  // Re-open Request Handler
+  const handleRequestReopen = (report: ReceivingReport) => {
+    setReopenPrompt({
+      isOpen: true,
+      documentType: 'RECEIVING',
+      documentId: report.id,
+      documentNo: report.poNumber,
+      title: `إذن استلام وارد رقم ${report.poNumber} (${report.supplierName})`,
+      onConfirm: () => handleConfirmReopen(report),
+    });
+  };
+
+  // Confirm Re-open
+  const handleConfirmReopen = (report: ReceivingReport) => {
+    setPoNumber(report.poNumber);
+    setSupplierName(report.supplierName);
+    setDeliveryNoteNo(report.deliveryNoteNo || '');
+    setItems(report.items || []);
+    setActiveTab('receiving');
+    setReopenPrompt(null);
+    if (settings.soundEnabled) SoundEffects.playInvoiceUnlock(settings.soundVolume);
+    setImportNotice(`تمت إعادة فتح إذن الاستلام (${report.poNumber}) للتعديل اليدوي والمسح الإضافي`);
   };
 
   const totalExpected = items.reduce((acc, i) => acc + i.expectedQty, 0);
   const totalReceived = items.reduce((acc, i) => acc + i.receivedQty, 0);
   const totalDamaged = items.reduce((acc, i) => acc + i.damagedQty, 0);
+  const totalCartons = items.reduce((acc, i) => acc + (i.cartonsCount || 0), 0);
+  const totalPacks = items.reduce((acc, i) => acc + (i.packsCount || 0), 0);
+  const totalPieces = items.reduce((acc, i) => acc + (i.piecesCount || 0), 0);
 
   const filteredItems = items.filter(item => 
     !searchQuery || 
@@ -272,8 +421,8 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
               </div>
               <p className="text-xs text-slate-400">
                 {isRtl 
-                  ? 'مطابقة بوالص الشحن وأوامر الشراء الواردة عبر الإكسيل (الافتراضي) أو PDF، رصد العجز والتالف، وإصدار أذون الاستلام' 
-                  : 'Inbound PO matching via Excel (Default) or PDF, barcode verification, damage logging & receipts'}
+                  ? 'مطابقة بوالص الشحن، تجميع العبوات (كراتين + باكتات + حبات)، وتثبيت الأعمدة باللمس مع خيار إعادة الفتح الآمن' 
+                  : 'Inbound PO matching, packaging multiplier & touch column header locking with secure re-open policy'}
               </p>
             </div>
           </div>
@@ -292,8 +441,8 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
               onClick={() => setActiveTab(activeTab === 'receiving' ? 'history' : 'receiving')}
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700"
             >
-              <FileText className="w-4 h-4 text-blue-400" />
-              <span>{activeTab === 'receiving' ? `السجلات السابقة (${savedReports.length})` : 'العودة لجلسة الاستلام'}</span>
+              <Lock className="w-4 h-4 text-amber-400" />
+              <span>{activeTab === 'receiving' ? `السجلات المقفلة (${savedReports.length})` : 'العودة لجلسة الاستلام'}</span>
             </button>
 
             {activeTab === 'receiving' && (
@@ -303,7 +452,7 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
                   className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white shadow-sm transition-all"
                 >
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>{isRtl ? 'اعتماد إذن الاستلام' : 'Approve Goods Receipt'}</span>
+                  <span>{isRtl ? 'اعتماد وقفل إذن الاستلام' : 'Approve & Lock Receipt'}</span>
                 </button>
 
                 <button
@@ -334,12 +483,20 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
         </div>
       )}
 
+      {/* ========================================================================= */}
+      {/* HISTORY TAB WITH LOCKED DOCUMENTS, LINKS, AND RE-OPEN LOGIC               */}
+      {/* ========================================================================= */}
       {activeTab === 'history' ? (
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5 shadow-lg space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
             <div>
-              <h2 className="text-sm font-bold text-white">سجل أذون الاستلام المعتمدة ({savedReports.length})</h2>
-              <p className="text-xs text-slate-400">كافة أذون الاستلام المسجلة بالباركود والمطابقة لأوامر الشراء</p>
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <Lock className="w-4 h-4 text-amber-400" />
+                <span>سجل أذون الاستلام المعتمدة والمقفلة ({savedReports.length})</span>
+              </h2>
+              <p className="text-xs text-slate-400">
+                المستندات المنتهية محفوظة بروابط للقراءة، ولا يمكن فتحها للتعديل إلا بعد تأكيد الموافقة.
+              </p>
             </div>
             {savedReports.length > 0 && (
               <button
@@ -351,6 +508,7 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
               </button>
             )}
           </div>
+
           {savedReports.length === 0 ? (
             <div className="text-center py-10 text-slate-500 text-sm">
               لا توجد أذون استلام محفوظة بعد.
@@ -358,22 +516,52 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
           ) : (
             <div className="space-y-3">
               {savedReports.map(rep => (
-                <div key={rep.id} className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div key={rep.id} className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3 hover:border-slate-700 transition-all">
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
-                      <span className="font-mono font-bold text-blue-400 text-sm">{rep.poNumber}</span>
-                      <span className="text-xs text-slate-300">المورد: {rep.supplierName}</span>
+                      <span className="font-mono font-bold text-emerald-400 text-sm">{rep.poNumber}</span>
+                      <span className="text-xs text-slate-300">المورد: <strong>{rep.supplierName}</strong></span>
+                      {rep.deliveryNoteNo && (
+                        <span className="text-[11px] bg-slate-900 text-slate-400 px-2 py-0.5 rounded border border-slate-800">
+                          بوليصة: {rep.deliveryNoteNo}
+                        </span>
+                      )}
+                      <span className="text-[10px] bg-slate-900 text-amber-300 px-2 py-0.5 rounded border border-amber-500/30 flex items-center gap-1 font-bold">
+                        <Lock className="w-3 h-3" />
+                        <span>مكتمل ومقفل</span>
+                      </span>
                     </div>
-                    <div className="text-xs text-slate-400 flex items-center gap-3">
+                    <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3">
                       <span>الأصناف: {rep.items?.length || 0}</span>
                       <span>المتوقع: {rep.totalExpectedQty}</span>
                       <span className="text-emerald-400 font-bold">المستلم: {rep.totalReceivedQty}</span>
                       {rep.totalDamagedQty > 0 && <span className="text-red-400">التالف: {rep.totalDamagedQty}</span>}
-                      <span>{new Date(rep.createdAt).toLocaleDateString()}</span>
+                      <span>المدقق: {rep.auditorName}</span>
+                      <span>{new Date(rep.createdAt).toLocaleString()}</span>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-2">
+                    {/* Read-Only View Button */}
+                    <button
+                      onClick={() => setViewingReport(rep)}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-indigo-300 rounded-lg text-xs font-bold flex items-center gap-1 border border-indigo-900/40 transition-all"
+                      title="عرض تفاصيل إذن الاستلام للقراءة فقط"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>عرض المستند</span>
+                    </button>
+
+                    {/* Re-open Button with Strict Confirmation */}
+                    <button
+                      onClick={() => handleRequestReopen(rep)}
+                      className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg text-xs font-bold flex items-center gap-1 border border-amber-500/40 transition-all"
+                      title="طلب إعادة فتح المستند المكتمل للتعديل"
+                    >
+                      <Unlock className="w-3.5 h-3.5" />
+                      <span>إعادة فتح</span>
+                    </button>
+
                     <button
                       onClick={() => exportReceivingReportToExcel(rep)}
                       className="p-2 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded-lg text-xs"
@@ -381,6 +569,7 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
                     >
                       <FileSpreadsheet className="w-4 h-4" />
                     </button>
+
                     <button
                       onClick={async () => {
                         if (confirm(`حذف إذن الاستلام ${rep.poNumber}؟`)) {
@@ -389,6 +578,7 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
                         }
                       }}
                       className="p-2 bg-slate-800 hover:bg-red-950 text-red-400 rounded-lg text-xs"
+                      title="حذف"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -484,25 +674,35 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
             </div>
           </div>
 
-          {/* KPIs */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
-              <div className="text-[11px] text-slate-400 font-semibold">إجمالي أصناف أمر الشراء</div>
+          {/* KPIs & Packaging Totals */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+              <div className="text-[11px] text-slate-400 font-semibold">أصناف أمر الشراء</div>
               <div className="text-lg font-black text-white mt-1">{items.length} <span className="text-xs font-normal text-slate-400">صنف</span></div>
             </div>
 
-            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
-              <div className="text-[11px] text-blue-400 font-semibold">الكمية المتوقعة بأمر الشراء</div>
+            <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+              <div className="text-[11px] text-blue-400 font-semibold">المطلوب دفترياً</div>
               <div className="text-lg font-black text-blue-300 mt-1">{totalExpected} <span className="text-xs font-normal text-slate-400">قطعة</span></div>
             </div>
 
-            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
-              <div className="text-[11px] text-emerald-400 font-semibold">الكمية المستلمة الفعلية</div>
+            <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+              <div className="text-[11px] text-emerald-400 font-semibold">إجمالي المستلم الفعلي</div>
               <div className="text-lg font-black text-emerald-300 mt-1">{totalReceived} <span className="text-xs font-normal text-slate-400">قطعة</span></div>
             </div>
 
-            <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
-              <div className="text-[11px] text-red-400 font-semibold">التالف أثناء النقل والشحن</div>
+            <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+              <div className="text-[11px] text-amber-400 font-semibold">إجمالي الكراتين</div>
+              <div className="text-lg font-black text-amber-300 mt-1">{totalCartons} <span className="text-xs font-normal text-slate-400">كرتونة</span></div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+              <div className="text-[11px] text-indigo-400 font-semibold">إجمالي الباكتات</div>
+              <div className="text-lg font-black text-indigo-300 mt-1">{totalPacks} <span className="text-xs font-normal text-slate-400">باكت</span></div>
+            </div>
+
+            <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl">
+              <div className="text-[11px] text-red-400 font-semibold">التالف للشحن</div>
               <div className="text-lg font-black text-red-300 mt-1">{totalDamaged} <span className="text-xs font-normal text-slate-400">قطعة</span></div>
             </div>
           </div>
@@ -596,13 +796,13 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
                       <span>المسح المباشر بالباركود</span>
                     </div>
                     <p className="text-[11px] text-slate-400">
-                      وجّه قارئ الباركود اللاسلكي أو السلكي على كراتين البضاعة لبدء حصر الاستلام مباشرة.
+                      وجّه قارئ الباركود على كراتين البضاعة لتسجيل الكمية مباشرة في العمود المثبت باللمس.
                     </p>
                   </div>
 
                   <div className="pt-2">
                     <div className="text-[11px] text-slate-500 bg-slate-900 border border-slate-800 rounded-lg p-2 text-center font-mono">
-                      القارئ جاهز للاستماع تلقائياً...
+                      القارئ جاهز للتسجيل في: {activeTargetColumn === 'cartons' ? 'الكراتين' : activeTargetColumn === 'packs' ? 'الباكتات' : 'الحبات'}
                     </div>
                   </div>
                 </div>
@@ -610,29 +810,97 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
             </div>
           )}
 
-          {/* Barcode Quick Scan Bar */}
-          <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl flex items-center gap-2">
-            <div className="relative flex-1">
-              <ScanLine className="w-4 h-4 text-emerald-400 absolute left-3 top-2.5 rtl:left-auto rtl:right-3" />
-              <input
-                type="text"
-                value={manualBarcode}
-                onChange={(e) => setManualBarcode(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleAddManual()}
-                placeholder="امسح باركود البضاعة الواردة للتسجيل الفوري والمطابقة..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 rtl:pl-3 rtl:pr-9 py-2 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
-              />
+          {/* Barcode Quick Scan & Column Header Lock Selector */}
+          <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl space-y-3">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-slate-300 flex items-center gap-1">
+                  <Pin className="w-3.5 h-3.5 text-amber-400" />
+                  <span>تثبيت عمود التسجيل باللمس:</span>
+                </span>
+
+                <div className="inline-flex bg-slate-950 p-1 rounded-lg border border-slate-800 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTargetColumn('cartons');
+                      if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                    }}
+                    className={`px-2.5 py-1 text-xs font-bold rounded transition-all flex items-center gap-1 ${
+                      activeTargetColumn === 'cartons'
+                        ? 'bg-amber-500 text-black shadow font-black'
+                        : 'text-amber-300/70 hover:text-amber-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    {activeTargetColumn === 'cartons' && <Pin className="w-3 h-3" />}
+                    <span>الكراتين (Cartons)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTargetColumn('packs');
+                      if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                    }}
+                    className={`px-2.5 py-1 text-xs font-bold rounded transition-all flex items-center gap-1 ${
+                      activeTargetColumn === 'packs'
+                        ? 'bg-indigo-600 text-white shadow font-black'
+                        : 'text-indigo-300/70 hover:text-indigo-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    {activeTargetColumn === 'packs' && <Pin className="w-3 h-3" />}
+                    <span>الباكتات (Packs)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTargetColumn('pieces');
+                      if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                    }}
+                    className={`px-2.5 py-1 text-xs font-bold rounded transition-all flex items-center gap-1 ${
+                      activeTargetColumn === 'pieces'
+                        ? 'bg-emerald-600 text-white shadow font-black'
+                        : 'text-emerald-300/70 hover:text-emerald-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    {activeTargetColumn === 'pieces' && <Pin className="w-3 h-3" />}
+                    <span>حبات فردية (Pieces)</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="text-[11px] text-slate-400">
+                المس رأس أي عمود في الجدول أدناه لتثبيته للمسح المباشر ⚡
+              </div>
             </div>
-            <button
-              onClick={handleAddManual}
-              className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-sm"
-            >
-              <Plus className="w-4 h-4" />
-              <span>إضافة صنف</span>
-            </button>
+
+            {/* Quick scan input form */}
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <ScanLine className="w-4 h-4 text-emerald-400 absolute left-3 top-2.5 rtl:left-auto rtl:right-3" />
+                <input
+                  type="text"
+                  value={manualBarcode}
+                  onChange={(e) => setManualBarcode(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddManual()}
+                  placeholder={`امسح باركود البضاعة للتسجيل الفوري في عمود [${
+                    activeTargetColumn === 'cartons' ? 'الكراتين' : activeTargetColumn === 'packs' ? 'الباكتات' : 'الحبات'
+                  }]...`}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 rtl:pl-3 rtl:pr-9 py-2 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+              <button
+                onClick={handleAddManual}
+                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-sm"
+              >
+                <Plus className="w-4 h-4" />
+                <span>إضافة صنف</span>
+              </button>
+            </div>
           </div>
 
-          {/* Table of Receiving Items */}
+          {/* Table of Receiving Items with Touch Column Header Locking & Manual Controls */}
           {items.length > 0 && (
             <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
               <div className="p-3 bg-slate-950/80 border-b border-slate-800 flex items-center justify-between">
@@ -654,8 +922,66 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
                   <thead className="bg-slate-950 text-slate-400 font-bold border-b border-slate-800">
                     <tr>
                       <th className="p-2.5">الباركود والصنف</th>
-                      <th className="p-2.5 text-center">الكمية المتوقعة</th>
-                      <th className="p-2.5 text-center">الكمية المستلمة</th>
+                      <th className="p-2.5 text-center">المطلوب دفترياً</th>
+                      
+                      {/* TOUCH CLICKABLE HEADER: Cartons */}
+                      <th 
+                        onClick={() => {
+                          setActiveTargetColumn('cartons');
+                          if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                        }}
+                        className={`p-2.5 text-center cursor-pointer transition-all ${
+                          activeTargetColumn === 'cartons'
+                            ? 'bg-amber-500/30 text-amber-300 border-b-2 border-amber-400 font-black'
+                            : 'text-amber-300/80 hover:bg-slate-850 hover:text-amber-300'
+                        }`}
+                        title="المس لتثبيت تسجيل المسح في عمود الكراتين"
+                      >
+                        <div className="flex items-center justify-center gap-1">
+                          {activeTargetColumn === 'cartons' && <Pin className="w-3 h-3 text-amber-400 animate-bounce" />}
+                          <span>الكراتين</span>
+                        </div>
+                      </th>
+
+                      {/* TOUCH CLICKABLE HEADER: Packs */}
+                      <th 
+                        onClick={() => {
+                          setActiveTargetColumn('packs');
+                          if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                        }}
+                        className={`p-2.5 text-center cursor-pointer transition-all ${
+                          activeTargetColumn === 'packs'
+                            ? 'bg-indigo-500/30 text-indigo-200 border-b-2 border-indigo-400 font-black'
+                            : 'text-indigo-300/80 hover:bg-slate-850 hover:text-indigo-300'
+                        }`}
+                        title="المس لتثبيت تسجيل المسح في عمود الباكتات"
+                      >
+                        <div className="flex items-center justify-center gap-1">
+                          {activeTargetColumn === 'packs' && <Pin className="w-3 h-3 text-indigo-400 animate-bounce" />}
+                          <span>الباكتات</span>
+                        </div>
+                      </th>
+
+                      {/* TOUCH CLICKABLE HEADER: Loose Pieces */}
+                      <th 
+                        onClick={() => {
+                          setActiveTargetColumn('pieces');
+                          if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                        }}
+                        className={`p-2.5 text-center cursor-pointer transition-all ${
+                          activeTargetColumn === 'pieces'
+                            ? 'bg-emerald-500/30 text-emerald-200 border-b-2 border-emerald-400 font-black'
+                            : 'text-emerald-300/80 hover:bg-slate-850 hover:text-emerald-300'
+                        }`}
+                        title="المس لتثبيت تسجيل المسح في عمود الحبات"
+                      >
+                        <div className="flex items-center justify-center gap-1">
+                          {activeTargetColumn === 'pieces' && <Pin className="w-3 h-3 text-emerald-400 animate-bounce" />}
+                          <span>حبات فردية</span>
+                        </div>
+                      </th>
+
+                      <th className="p-2.5 text-center font-bold text-white bg-slate-900">إجمالي المستلم</th>
                       <th className="p-2.5 text-center">التالف</th>
                       <th className="p-2.5 text-center">رقم التشغيلة (Batch)</th>
                       <th className="p-2.5 text-center">تاريخ الصلاحية</th>
@@ -669,19 +995,101 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
                         <td className="p-2.5">
                           <div className="font-bold text-white font-mono">{item.itemCode}</div>
                           <div className="text-[11px] text-slate-400">{item.itemName}</div>
+                          <div className="text-[9px] text-slate-500 font-mono">
+                            معامل الكرتونة: ×{item.cartonFactor || 24} | باكت: ×{item.packFactor || 6}
+                          </div>
                         </td>
-                        <td className="p-2.5 text-center font-mono font-bold">
+                        <td className="p-2.5 text-center font-mono font-bold text-slate-300">
                           {item.expectedQty} {item.unit}
                         </td>
-                        <td className="p-2.5 text-center">
-                          <input
-                            type="number"
-                            min="0"
-                            value={item.receivedQty}
-                            onChange={(e) => handleUpdateItem(item.id, { receivedQty: Number(e.target.value) || 0 })}
-                            className="w-16 bg-slate-950 border border-slate-700 rounded px-1.5 py-1 text-center font-mono font-bold text-emerald-300 focus:outline-none focus:border-emerald-500"
-                          />
+
+                        {/* Cartons Input with +/- */}
+                        <td className="p-2 text-center">
+                          <div className="inline-flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateItem(item.id, { cartonsCount: Math.max(0, (item.cartonsCount || 0) - 1) })}
+                              className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white text-xs"
+                            >
+                              <Minus className="w-3 h-3" />
+                            </button>
+                            <input
+                              type="number"
+                              min="0"
+                              value={item.cartonsCount || 0}
+                              onChange={(e) => handleUpdateItem(item.id, { cartonsCount: Number(e.target.value) || 0 })}
+                              className="w-10 bg-transparent text-center font-mono font-bold text-amber-300 focus:outline-none"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateItem(item.id, { cartonsCount: (item.cartonsCount || 0) + 1 })}
+                              className="p-1 hover:bg-slate-800 rounded text-amber-400 hover:text-amber-300 text-xs"
+                            >
+                              <Plus className="w-3 h-3" />
+                            </button>
+                          </div>
                         </td>
+
+                        {/* Packs Input with +/- */}
+                        <td className="p-2 text-center">
+                          <div className="inline-flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateItem(item.id, { packsCount: Math.max(0, (item.packsCount || 0) - 1) })}
+                              className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white text-xs"
+                            >
+                              <Minus className="w-3 h-3" />
+                            </button>
+                            <input
+                              type="number"
+                              min="0"
+                              value={item.packsCount || 0}
+                              onChange={(e) => handleUpdateItem(item.id, { packsCount: Number(e.target.value) || 0 })}
+                              className="w-10 bg-transparent text-center font-mono font-bold text-indigo-300 focus:outline-none"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateItem(item.id, { packsCount: (item.packsCount || 0) + 1 })}
+                              className="p-1 hover:bg-slate-800 rounded text-indigo-400 hover:text-indigo-300 text-xs"
+                            >
+                              <Plus className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </td>
+
+                        {/* Pieces Input with +/- */}
+                        <td className="p-2 text-center">
+                          <div className="inline-flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateItem(item.id, { piecesCount: Math.max(0, (item.piecesCount || 0) - 1) })}
+                              className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white text-xs"
+                            >
+                              <Minus className="w-3 h-3" />
+                            </button>
+                            <input
+                              type="number"
+                              min="0"
+                              value={item.piecesCount || 0}
+                              onChange={(e) => handleUpdateItem(item.id, { piecesCount: Number(e.target.value) || 0 })}
+                              className="w-10 bg-transparent text-center font-mono font-bold text-emerald-300 focus:outline-none"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateItem(item.id, { piecesCount: (item.piecesCount || 0) + 1 })}
+                              className="p-1 hover:bg-slate-800 rounded text-emerald-400 hover:text-emerald-300 text-xs"
+                            >
+                              <Plus className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </td>
+
+                        {/* Total Calculated Received Qty */}
+                        <td className="p-2.5 text-center font-mono font-bold text-sm bg-slate-950/80 text-emerald-400">
+                          {item.receivedQty}
+                        </td>
+
+                        {/* Damaged Qty */}
                         <td className="p-2.5 text-center">
                           <input
                             type="number"
@@ -691,6 +1099,8 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
                             className="w-14 bg-slate-950 border border-slate-700 rounded px-1 py-1 text-center font-mono text-red-300 focus:outline-none focus:border-red-500"
                           />
                         </td>
+
+                        {/* Batch Number */}
                         <td className="p-2.5 text-center">
                           <input
                             type="text"
@@ -700,6 +1110,8 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
                             className="w-20 bg-slate-950 border border-slate-800 rounded px-1.5 py-1 text-center font-mono text-slate-300"
                           />
                         </td>
+
+                        {/* Expiry Date */}
                         <td className="p-2.5 text-center">
                           <input
                             type="date"
@@ -708,6 +1120,8 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
                             className="bg-slate-950 border border-slate-800 rounded px-1.5 py-1 text-center font-mono text-slate-300 text-[11px]"
                           />
                         </td>
+
+                        {/* Status Badge */}
                         <td className="p-2.5 text-center">
                           <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
                             item.status === 'EXACT'
@@ -719,10 +1133,13 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
                             {item.status === 'EXACT' ? 'مكتمل' : item.status === 'SHORTAGE' ? 'ناقص' : 'زيادة'}
                           </span>
                         </td>
+
+                        {/* Delete Button */}
                         <td className="p-2.5 text-center">
                           <button
                             onClick={() => setItems(prev => prev.filter(i => i.id !== item.id))}
                             className="p-1 text-slate-500 hover:text-red-400"
+                            title="حذف الصنف"
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
@@ -735,6 +1152,137 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
             </div>
           )}
         </>
+      )}
+
+      {/* ========================================================================= */}
+      {/* READ-ONLY REPORT VIEW MODAL                                               */}
+      {/* ========================================================================= */}
+      {viewingReport && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-4xl w-full p-5 sm:p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in duration-150 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <FileCheck className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-sm font-black text-white">
+                  عرض مستند إذن الاستلام المكتمل (للقراءة فقط)
+                </h3>
+              </div>
+              <button
+                onClick={() => setViewingReport(null)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-950/80 p-3.5 rounded-xl border border-slate-800">
+              <div>
+                <div className="text-[10px] text-slate-400">رقم أمر الشراء</div>
+                <div className="text-xs font-mono font-bold text-emerald-300">{viewingReport.poNumber}</div>
+              </div>
+              <div>
+                <div className="text-[10px] text-slate-400">المورد</div>
+                <div className="text-xs font-bold text-white">{viewingReport.supplierName}</div>
+              </div>
+              <div>
+                <div className="text-[10px] text-slate-400">الكمية المستلمة / المتوقعة</div>
+                <div className="text-xs font-mono font-bold text-blue-300">
+                  {viewingReport.totalReceivedQty} / {viewingReport.totalExpectedQty}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] text-slate-400">تاريخ الاعتماد</div>
+                <div className="text-[11px] text-slate-300">{new Date(viewingReport.createdAt).toLocaleString()}</div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto pr-1">
+              <table className="w-full text-xs text-slate-300 text-right">
+                <thead className="bg-slate-950 text-slate-400 font-bold border-b border-slate-800 sticky top-0">
+                  <tr>
+                    <th className="p-2">الصنف</th>
+                    <th className="p-2 text-center">المتوقع</th>
+                    <th className="p-2 text-center">الكراتين</th>
+                    <th className="p-2 text-center">الباكتات</th>
+                    <th className="p-2 text-center">الحبات</th>
+                    <th className="p-2 text-center">المستلم الفعلي</th>
+                    <th className="p-2 text-center">التالف</th>
+                    <th className="p-2 text-center">التشغيلة والصلاحية</th>
+                    <th className="p-2 text-center">الحالة</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {viewingReport.items.map((item, idx) => (
+                    <tr key={idx} className="hover:bg-slate-800/30">
+                      <td className="p-2">
+                        <div className="font-mono font-bold text-white">{item.itemCode}</div>
+                        <div className="text-[11px] text-slate-400">{item.itemName}</div>
+                      </td>
+                      <td className="p-2 text-center font-mono">{item.expectedQty}</td>
+                      <td className="p-2 text-center font-mono text-amber-300">{item.cartonsCount || 0}</td>
+                      <td className="p-2 text-center font-mono text-indigo-300">{item.packsCount || 0}</td>
+                      <td className="p-2 text-center font-mono text-emerald-300">{item.piecesCount || 0}</td>
+                      <td className="p-2 text-center font-mono font-bold text-emerald-400">{item.receivedQty}</td>
+                      <td className="p-2 text-center font-mono text-red-300">{item.damagedQty}</td>
+                      <td className="p-2 text-center text-[10px] text-slate-400">
+                        {item.batchNumber ? `LOT: ${item.batchNumber}` : '-'} | {item.expiryDate || '-'}
+                      </td>
+                      <td className="p-2 text-center">
+                        <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold ${
+                          item.status === 'EXACT' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-300 border border-amber-800'
+                        }`}>
+                          {item.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-slate-800">
+              <button
+                onClick={() => handleRequestReopen(viewingReport)}
+                className="px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 border border-amber-500/40"
+              >
+                <Unlock className="w-3.5 h-3.5" />
+                <span>طلب إعادة فتح للتعديل</span>
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => exportReceivingReportToExcel(viewingReport)}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>تصدير إكسيل</span>
+                </button>
+
+                <button
+                  onClick={() => setViewingReport(null)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold"
+                >
+                  إغلاق
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* RE-OPEN CONFIRMATION SECURITY MODAL (نعم / لا / إلغاء)                      */}
+      {/* ========================================================================= */}
+      {reopenPrompt && (
+        <ReopenConfirmationModal
+          isOpen={reopenPrompt.isOpen}
+          onClose={() => setReopenPrompt(null)}
+          onDeny={() => setReopenPrompt(null)}
+          onConfirm={reopenPrompt.onConfirm}
+          documentTitle={reopenPrompt.title}
+          documentTypeLabel="إذن استلام وارد مقفل"
+          isRtl={isRtl}
+        />
       )}
 
       {/* Packaging Rules Modal */}

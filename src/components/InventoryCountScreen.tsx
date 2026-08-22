@@ -19,9 +19,14 @@ import {
   Zap,
   Tag,
   Sparkles,
-  ArrowRightLeft
+  ArrowRightLeft,
+  Pin,
+  Lock,
+  Unlock,
+  Eye,
+  X
 } from 'lucide-react';
-import type { AppSettings, InventoryCountItem, InventoryCountReport, PackagingGroupRule } from '../types';
+import type { AppSettings, InventoryCountItem, InventoryCountReport, PackagingGroupRule, ActiveTargetColumn, DocumentReopenPrompt } from '../types';
 import { 
   parseExcelOrCsvFile, 
   exportInventoryReportToExcel,
@@ -39,6 +44,7 @@ import { SoundEffects } from '../services/audio';
 import { PackagingRulesModal } from './PackagingRulesModal';
 import { FastCountPanel } from './FastCountPanel';
 import { GroupBarcodeTagsModal } from './GroupBarcodeTagsModal';
+import { ReopenConfirmationModal } from './ReopenConfirmationModal';
 
 interface InventoryCountScreenProps {
   settings: AppSettings;
@@ -63,6 +69,13 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
   const [savedReports, setSavedReports] = useState<InventoryCountReport[]>([]);
   const [activeTab, setActiveTab] = useState<'count' | 'history'>('count');
   
+  // Packaging Column Header Locking State (تثبيت عمود تجميع العبوات باللمس)
+  const [activeTargetColumn, setActiveTargetColumn] = useState<ActiveTargetColumn>('pieces');
+
+  // Completed document view & reopen security modal states
+  const [reopenPrompt, setReopenPrompt] = useState<DocumentReopenPrompt | null>(null);
+  const [viewingReport, setViewingReport] = useState<InventoryCountReport | null>(null);
+
   // FAST COUNT MODE STATE (وضع الجرد السريع)
   const [isFastCountMode, setIsFastCountMode] = useState<boolean>(true);
   const [activeFastGroup, setActiveFastGroup] = useState<PackagingGroupRule | null>(null);
@@ -98,16 +111,30 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
       return;
     }
 
-    // 2. Otherwise process item scan
+    // 2. Otherwise process item scan and write into the locked target packaging column
     setItems(prev => {
       const idx = prev.findIndex(i => i.itemCode.toLowerCase() === clean.toLowerCase());
       if (idx !== -1) {
         const updated = [...prev];
         const cur = updated[idx];
-        const nextPieces = cur.piecesCount + 1;
-        const calcTotal = (cur.cartonsCount * cur.cartonFactor) + (cur.packsCount * cur.packFactor) + nextPieces;
+        
+        let nextCartons = cur.cartonsCount;
+        let nextPacks = cur.packsCount;
+        let nextPieces = cur.piecesCount;
+
+        if (activeTargetColumn === 'cartons') {
+          nextCartons += 1;
+        } else if (activeTargetColumn === 'packs') {
+          nextPacks += 1;
+        } else {
+          nextPieces += 1;
+        }
+
+        const calcTotal = (nextCartons * cur.cartonFactor) + (nextPacks * cur.packFactor) + nextPieces;
         updated[idx] = {
           ...cur,
+          cartonsCount: nextCartons,
+          packsCount: nextPacks,
           piecesCount: nextPieces,
           calculatedActualQty: calcTotal,
           varianceQty: calcTotal - cur.bookQty,
@@ -123,6 +150,11 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
         const packFactor = matchedRule ? matchedRule.packFactor : 6;
         const groupName = matchedRule ? matchedRule.name : 'مجموعة عامة';
 
+        const initialCartons = activeTargetColumn === 'cartons' ? 1 : 0;
+        const initialPacks = activeTargetColumn === 'packs' ? 1 : 0;
+        const initialPieces = activeTargetColumn === 'pieces' ? 1 : 0;
+        const initialCalc = (initialCartons * cartonFactor) + (initialPacks * packFactor) + initialPieces;
+
         const newItem: InventoryCountItem = {
           id: `inv-${Date.now()}`,
           itemCode: clean,
@@ -131,13 +163,13 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
           groupId: matchedRule?.id,
           groupName,
           bookQty: 0,
-          cartonsCount: 0,
+          cartonsCount: initialCartons,
           cartonFactor,
-          packsCount: 0,
+          packsCount: initialPacks,
           packFactor,
-          piecesCount: 1,
-          calculatedActualQty: 1,
-          varianceQty: 1,
+          piecesCount: initialPieces,
+          calculatedActualQty: initialCalc,
+          varianceQty: initialCalc,
           status: 'SURPLUS',
           lastScannedAt: new Date().toISOString(),
         };
@@ -151,7 +183,7 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
         return [newItem, ...prev];
       }
     });
-  }, [lastScannedCode, packagingRules, activeFastGroup, settings.soundEnabled, settings.soundVolume]);
+  }, [lastScannedCode, packagingRules, activeFastGroup, activeTargetColumn, settings.soundEnabled, settings.soundVolume]);
 
   // Handle Excel Book Balance Import
   const handleImportExcel = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -301,6 +333,33 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
 
   const uniqueGroups = Array.from(new Set(items.map(i => i.groupName).filter(Boolean)));
 
+  // Handle Re-open Document Flow
+  const handleRequestReopen = (report: InventoryCountReport) => {
+    setReopenPrompt({
+      isOpen: true,
+      documentId: report.id,
+      documentTitle: `${report.title} (${report.sectionOrAisle})`,
+      documentTypeLabel: 'تقرير جرد دوري معتمد',
+      targetReport: report,
+    });
+  };
+
+  const handleConfirmReopen = () => {
+    if (!reopenPrompt?.targetReport) return;
+    const rep = reopenPrompt.targetReport as InventoryCountReport;
+    setCountTitle(rep.title);
+    setSectionOrAisle(rep.sectionOrAisle);
+    setItems(rep.items || []);
+    setActiveTab('count');
+    setReopenPrompt(null);
+    setViewingReport(null);
+    if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
+  };
+
+  const handleDenyReopen = () => {
+    setReopenPrompt(null);
+  };
+
   return (
     <div className="space-y-5">
       {/* Top Banner */}
@@ -327,8 +386,8 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
               </div>
               <p className="text-xs text-slate-400">
                 {isRtl 
-                  ? 'تطبيق شروط ضم المنتجات في مجموعات متشابهة من حيث العبوة واحتساب الإجمالي الفعلي (كراتين + باكتات + حبات) تلقائياً' 
-                  : 'Automated package multiplier (Cartons + Packs + Loose Pieces) & Barcode range groupings'}
+                  ? 'تطبيق شروط ضم المنتجات واحتساب الإجمالي الفعلي (كراتين + باكتات + حبات) تلقائياً مع تثبيت رؤوس الأعمدة باللمس' 
+                  : 'Automated package multiplier (Cartons + Packs + Loose Pieces) & Touch Column Header Locking'}
               </p>
             </div>
           </div>
@@ -370,8 +429,8 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
               onClick={() => setActiveTab(activeTab === 'count' ? 'history' : 'count')}
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700"
             >
-              <ClipboardList className="w-4 h-4 text-indigo-400" />
-              <span>{activeTab === 'count' ? `السجلات السابقة (${savedReports.length})` : 'العودة لجلسة الجرد'}</span>
+              <Lock className="w-4 h-4 text-amber-400" />
+              <span>{activeTab === 'count' ? `السجلات المقفلة (${savedReports.length})` : 'العودة لجلسة الجرد'}</span>
             </button>
 
             {activeTab === 'count' && (
@@ -413,8 +472,11 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 sm:p-5 shadow-lg space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
             <div>
-              <h2 className="text-sm font-bold text-white">سجل جلسات الجرد الدوري السابقة ({savedReports.length})</h2>
-              <p className="text-xs text-slate-400">كافة تقارير الجرد الدوري وتجميع العبوات المحسوبة بالباركود</p>
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <Lock className="w-4 h-4 text-amber-400" />
+                <span>سجل جلسات الجرد الدوري المكتملة والمقفلة ({savedReports.length})</span>
+              </h2>
+              <p className="text-xs text-slate-400">تقارير الجرد المعتمدة محمية ضد التعديل المباشر وتتطلب الموافقة والتأكيد لإعادة فتحها</p>
             </div>
             {savedReports.length > 0 && (
               <button
@@ -434,17 +496,21 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
           ) : (
             <div className="space-y-3">
               {savedReports.map(rep => (
-                <div key={rep.id} className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div key={rep.id} className="p-4 bg-slate-950/80 border border-slate-800 hover:border-slate-700 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3 transition-colors">
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
                       <span className="font-bold text-white text-sm">{rep.title}</span>
                       <span className="text-xs text-indigo-400 bg-indigo-950/80 px-2 py-0.5 rounded border border-indigo-800">{rep.sectionOrAisle}</span>
+                      <span className="text-[10px] bg-slate-800 text-amber-400 px-2 py-0.5 rounded flex items-center gap-1 border border-amber-900/40 font-bold">
+                        <Lock className="w-2.5 h-2.5" />
+                        <span>مكتمل ومقفل</span>
+                      </span>
                     </div>
-                    <div className="text-xs text-slate-400 flex items-center gap-3">
-                      <span>الأصناف: {rep.items?.length || 0}</span>
+                    <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3">
+                      <span>الأصناف: <strong className="text-white">{rep.items?.length || 0}</strong></span>
                       <span>الدفترى: {rep.totalBookQty}</span>
                       <span className="text-indigo-300 font-bold">الفعلي: {rep.totalActualQty}</span>
-                      <span className={rep.totalVarianceQty === 0 ? 'text-emerald-400' : rep.totalVarianceQty > 0 ? 'text-purple-400' : 'text-amber-400'}>
+                      <span className={rep.totalVarianceQty === 0 ? 'text-emerald-400 font-bold' : rep.totalVarianceQty > 0 ? 'text-purple-400 font-bold' : 'text-amber-400 font-bold'}>
                         الفارق: {rep.totalVarianceQty > 0 ? `+${rep.totalVarianceQty}` : rep.totalVarianceQty}
                       </span>
                       <span>{new Date(rep.createdAt).toLocaleDateString()}</span>
@@ -452,6 +518,26 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
                   </div>
 
                   <div className="flex items-center gap-2">
+                    {/* Read-Only View Button */}
+                    <button
+                      onClick={() => setViewingReport(rep)}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-indigo-300 rounded-lg text-xs font-bold flex items-center gap-1 border border-indigo-900/40"
+                      title="عرض تفاصيل تقرير الجرد للقراءة فقط"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>عرض</span>
+                    </button>
+
+                    {/* Re-open Button with Strict Confirmation */}
+                    <button
+                      onClick={() => handleRequestReopen(rep)}
+                      className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg text-xs font-bold flex items-center gap-1 border border-amber-500/40"
+                      title="طلب إعادة فتح المستند المكتمل للتعديل"
+                    >
+                      <Unlock className="w-3.5 h-3.5" />
+                      <span>إعادة فتح</span>
+                    </button>
+
                     <button
                       onClick={() => exportInventoryReportToExcel(rep)}
                       className="p-2 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded-lg text-xs"
@@ -522,6 +608,76 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
             </div>
           </div>
 
+          {/* TOUCH PACKAGING COLUMN LOCK SELECTOR (تثبيت عمود تجميع العبوات باللمس قبل المسح) */}
+          <div className="bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border-2 border-indigo-500/40 rounded-xl p-3.5 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-indigo-500/20 text-indigo-400 rounded-lg border border-indigo-500/30">
+                <Pin className="w-4 h-4 text-indigo-400" />
+              </div>
+              <div>
+                <div className="text-xs font-black text-white flex items-center gap-2">
+                  <span>{isRtl ? 'آلية تثبيت رؤوس أعمدة تجميع العبوات باللمس' : 'Touch Packaging Column Header Locking'}</span>
+                  <span className="text-[10px] bg-indigo-950 text-indigo-300 px-2 py-0.5 rounded font-bold border border-indigo-700">
+                    {activeTargetColumn === 'cartons' ? '📌 الكراتين (Cartons)' : activeTargetColumn === 'packs' ? '📌 الباكتات (Packs)' : '📌 الحبات الفردية (Pieces)'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  {isRtl ? 'المس رأس العمود أو الزر أدناه لتثبيت التسجيل فيه مباشرة عند مسح الباركود:' : 'Select target column by touch before scanning to record count into it directly:'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTargetColumn('cartons');
+                  if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all flex items-center gap-1.5 ${
+                  activeTargetColumn === 'cartons'
+                    ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/20 ring-2 ring-amber-300 scale-105'
+                    : 'bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700'
+                }`}
+              >
+                <Boxes className="w-3.5 h-3.5" />
+                <span>{isRtl ? '📦 كراتين ماستر' : 'Cartons'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTargetColumn('packs');
+                  if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all flex items-center gap-1.5 ${
+                  activeTargetColumn === 'packs'
+                    ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20 ring-2 ring-indigo-300 scale-105'
+                    : 'bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>{isRtl ? '🧃 باكتات / ربطات' : 'Packs'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTargetColumn('pieces');
+                  if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-black transition-all flex items-center gap-1.5 ${
+                  activeTargetColumn === 'pieces'
+                    ? 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20 ring-2 ring-emerald-300 scale-105'
+                    : 'bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700'
+                }`}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>{isRtl ? '🔘 حبات فردية' : 'Pieces'}</span>
+              </button>
+            </div>
+          </div>
+
           {/* KPIs */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="bg-slate-900 border border-slate-800 p-3.5 rounded-xl">
@@ -563,6 +719,8 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
               onAddItemToGroup={handleAddItemToGroup}
               onOpenBarcodeTags={() => setIsBarcodeTagsModalOpen(true)}
               onOpenRulesModal={() => setIsRulesModalOpen(true)}
+              activeTargetColumn={activeTargetColumn}
+              onChangeTargetColumn={(col) => setActiveTargetColumn(col)}
               isRtl={isRtl}
               settings={settings}
             />
@@ -577,20 +735,20 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
                     value={manualBarcode}
                     onChange={(e) => setManualBarcode(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && handleAddManualItem()}
-                    placeholder={isRtl ? 'امسح باركود أي صنف في الرف لزيادة الحبات وتطبيق معامل العبوة تلقائياً...' : 'Scan item barcode to count...'}
+                    placeholder={isRtl ? `امسح باركود أي صنف للتسجيل المباشر في عمود [${activeTargetColumn === 'cartons' ? 'الكراتين' : activeTargetColumn === 'packs' ? 'الباكتات' : 'الحبات'}]...` : 'Scan item barcode...'}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 rtl:pl-3 rtl:pr-9 py-2 text-xs font-mono text-white focus:outline-none focus:border-indigo-500"
                   />
                 </div>
                 <button
                   onClick={handleAddManualItem}
-                  className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center gap-1"
+                  className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center gap-1 shadow-sm"
                 >
                   <Plus className="w-4 h-4" />
                   <span>{isRtl ? 'إضافة صنف' : 'Add Item'}</span>
                 </button>
               </div>
 
-              {/* Standard Table with Packaging Breakdown Columns */}
+              {/* Standard Table with Packaging Breakdown Columns & Clickable Touch Headers */}
               <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
                 <div className="p-3 bg-slate-950/80 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
@@ -628,9 +786,64 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
                         <th className="p-2.5">الباركود والصنف</th>
                         <th className="p-2.5">المجموعة العبوية</th>
                         <th className="p-2.5 text-center">الرصيد الدفتري</th>
-                        <th className="p-2.5 text-center bg-indigo-950/30 text-indigo-300">الكراتين × المعامل</th>
-                        <th className="p-2.5 text-center bg-indigo-950/30 text-indigo-300">الباكتات × المعامل</th>
-                        <th className="p-2.5 text-center bg-indigo-950/30 text-indigo-300">حبات فردية</th>
+                        
+                        {/* TOUCH-CLICKABLE HEADER: Cartons */}
+                        <th 
+                          onClick={() => {
+                            setActiveTargetColumn('cartons');
+                            if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                          }}
+                          className={`p-2.5 text-center cursor-pointer transition-all ${
+                            activeTargetColumn === 'cartons' 
+                              ? 'bg-amber-500/30 text-amber-300 border-b-2 border-amber-400 font-black' 
+                              : 'bg-indigo-950/30 text-slate-400 hover:bg-slate-800 hover:text-amber-300'
+                          }`}
+                          title="انقر لتثبيت تسجيل المسح في عمود الكراتين"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            {activeTargetColumn === 'cartons' && <Pin className="w-3 h-3 text-amber-400 animate-bounce" />}
+                            <span>الكراتين × المعامل</span>
+                          </div>
+                        </th>
+
+                        {/* TOUCH-CLICKABLE HEADER: Packs */}
+                        <th 
+                          onClick={() => {
+                            setActiveTargetColumn('packs');
+                            if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                          }}
+                          className={`p-2.5 text-center cursor-pointer transition-all ${
+                            activeTargetColumn === 'packs' 
+                              ? 'bg-indigo-500/30 text-indigo-200 border-b-2 border-indigo-400 font-black' 
+                              : 'bg-indigo-950/30 text-slate-400 hover:bg-slate-800 hover:text-indigo-300'
+                          }`}
+                          title="انقر لتثبيت تسجيل المسح في عمود الباكتات"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            {activeTargetColumn === 'packs' && <Pin className="w-3 h-3 text-indigo-400 animate-bounce" />}
+                            <span>الباكتات × المعامل</span>
+                          </div>
+                        </th>
+
+                        {/* TOUCH-CLICKABLE HEADER: Pieces */}
+                        <th 
+                          onClick={() => {
+                            setActiveTargetColumn('pieces');
+                            if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                          }}
+                          className={`p-2.5 text-center cursor-pointer transition-all ${
+                            activeTargetColumn === 'pieces' 
+                              ? 'bg-emerald-500/30 text-emerald-200 border-b-2 border-emerald-400 font-black' 
+                              : 'bg-indigo-950/30 text-slate-400 hover:bg-slate-800 hover:text-emerald-300'
+                          }`}
+                          title="انقر لتثبيت تسجيل المسح في عمود الحبات"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            {activeTargetColumn === 'pieces' && <Pin className="w-3 h-3 text-emerald-400 animate-bounce" />}
+                            <span>حبات فردية</span>
+                          </div>
+                        </th>
+
                         <th className="p-2.5 text-center font-bold text-white bg-slate-900">الفعلي المحتسب</th>
                         <th className="p-2.5 text-center">الفارق</th>
                         <th className="p-2.5 text-center">الحالة</th>
@@ -660,7 +873,7 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
                               {item.bookQty} {item.unit}
                             </td>
                             {/* Cartons column */}
-                            <td className="p-2.5 text-center bg-indigo-950/20">
+                            <td className={`p-2.5 text-center transition-colors ${activeTargetColumn === 'cartons' ? 'bg-amber-500/10' : 'bg-indigo-950/20'}`}>
                               <div className="flex items-center justify-center gap-1">
                                 <input
                                   type="number"
@@ -673,7 +886,7 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
                               </div>
                             </td>
                             {/* Packs column */}
-                            <td className="p-2.5 text-center bg-indigo-950/20">
+                            <td className={`p-2.5 text-center transition-colors ${activeTargetColumn === 'packs' ? 'bg-indigo-500/10' : 'bg-indigo-950/20'}`}>
                               <div className="flex items-center justify-center gap-1">
                                 <input
                                   type="number"
@@ -686,7 +899,7 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
                               </div>
                             </td>
                             {/* Loose Pieces column */}
-                            <td className="p-2.5 text-center bg-indigo-950/20">
+                            <td className={`p-2.5 text-center transition-colors ${activeTargetColumn === 'pieces' ? 'bg-emerald-500/10' : 'bg-indigo-950/20'}`}>
                               <input
                                 type="number"
                                 min="0"
@@ -736,6 +949,116 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
           )}
         </div>
       )}
+
+      {/* Read-Only Viewing Modal for Completed Inventory Reports */}
+      {viewingReport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-4xl w-full p-5 sm:p-6 shadow-2xl space-y-4 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-indigo-500/20 text-indigo-400 rounded-lg">
+                  <ClipboardList className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-black text-white">{viewingReport.title}</h3>
+                    <span className="text-xs bg-slate-800 text-amber-400 px-2 py-0.5 rounded border border-amber-900/40 flex items-center gap-1 font-bold">
+                      <Lock className="w-3 h-3" />
+                      <span>للقراءة فقط (مكتمل ومقفل)</span>
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400">{viewingReport.sectionOrAisle} • المراجع: {viewingReport.auditorName}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    handleRequestReopen(viewingReport);
+                  }}
+                  className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg text-xs font-bold flex items-center gap-1.5 border border-amber-500/40"
+                >
+                  <Unlock className="w-3.5 h-3.5" />
+                  <span>إعادة فتح للتعديل</span>
+                </button>
+                <button
+                  onClick={() => setViewingReport(null)}
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Read-Only Items Table */}
+            <div className="overflow-y-auto flex-1 border border-slate-800 rounded-xl">
+              <table className="w-full text-xs text-slate-300 text-right">
+                <thead className="bg-slate-950 text-slate-400 font-bold sticky top-0 border-b border-slate-800">
+                  <tr>
+                    <th className="p-2.5">الباركود والصنف</th>
+                    <th className="p-2.5">المجموعة</th>
+                    <th className="p-2.5 text-center">الرصيد الدفتري</th>
+                    <th className="p-2.5 text-center">الكراتين</th>
+                    <th className="p-2.5 text-center">الباكتات</th>
+                    <th className="p-2.5 text-center">حبات فردية</th>
+                    <th className="p-2.5 text-center text-white">الفعلي المحتسب</th>
+                    <th className="p-2.5 text-center">الفارق</th>
+                    <th className="p-2.5 text-center">الحالة</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {viewingReport.items.map(item => (
+                    <tr key={item.id}>
+                      <td className="p-2.5">
+                        <div className="font-bold text-white font-mono">{item.itemCode}</div>
+                        <div className="text-[11px] text-slate-400">{item.itemName}</div>
+                      </td>
+                      <td className="p-2.5 text-slate-400">{item.groupName}</td>
+                      <td className="p-2.5 text-center font-mono">{item.bookQty}</td>
+                      <td className="p-2.5 text-center font-mono text-amber-300">{item.cartonsCount} (×{item.cartonFactor})</td>
+                      <td className="p-2.5 text-center font-mono text-indigo-300">{item.packsCount} (×{item.packFactor})</td>
+                      <td className="p-2.5 text-center font-mono text-emerald-300">{item.piecesCount}</td>
+                      <td className="p-2.5 text-center font-mono font-bold text-white">{item.calculatedActualQty}</td>
+                      <td className="p-2.5 text-center font-mono font-bold">
+                        <span className={item.varianceQty === 0 ? 'text-emerald-400' : item.varianceQty > 0 ? 'text-purple-400' : 'text-amber-400'}>
+                          {item.varianceQty > 0 ? `+${item.varianceQty}` : item.varianceQty}
+                        </span>
+                      </td>
+                      <td className="p-2.5 text-center">
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                          item.status === 'EXACT' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : item.status === 'SHORTAGE' ? 'bg-amber-950 text-amber-300 border border-amber-800' : 'bg-purple-950 text-purple-300 border border-purple-800'
+                        }`}>
+                          {item.status === 'EXACT' ? 'مطابق' : item.status === 'SHORTAGE' ? 'عجز' : 'زيادة'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-slate-800 text-xs text-slate-400">
+              <div>إجمالي الدفتري: <strong className="text-white">{viewingReport.totalBookQty}</strong> | إجمالي الفعلي: <strong className="text-indigo-300">{viewingReport.totalActualQty}</strong> | الفارق: <strong className={viewingReport.totalVarianceQty === 0 ? 'text-emerald-400' : 'text-amber-400'}>{viewingReport.totalVarianceQty}</strong></div>
+              <button
+                onClick={() => setViewingReport(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-bold"
+              >
+                إغلاق
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reopen Confirmation Modal */}
+      <ReopenConfirmationModal
+        isOpen={Boolean(reopenPrompt?.isOpen)}
+        onClose={() => setReopenPrompt(null)}
+        onConfirm={handleConfirmReopen}
+        onDeny={handleDenyReopen}
+        documentTitle={reopenPrompt?.documentTitle || ''}
+        documentTypeLabel={reopenPrompt?.documentTypeLabel || 'تقرير جرد دوري معتمد'}
+        isRtl={isRtl}
+      />
 
       {/* Packaging Rules Modal */}
       <PackagingRulesModal

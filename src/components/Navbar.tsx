@@ -16,7 +16,10 @@ import {
   Truck,
   RotateCcw,
   Boxes,
-  ListFilter
+  ListFilter,
+  Menu,
+  Sparkles,
+  ChevronDown
 } from 'lucide-react';
 import type { SyncMetadata, AppSettings } from '../types';
 import { translations } from '../services/i18n';
@@ -39,6 +42,8 @@ interface NavbarProps {
   canInstallPwa?: boolean;
   onInstallPwa?: () => void;
   onOpenAuditorModal?: () => void;
+  onToggleDrawer?: () => void;
+  onOpenApkGuide?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -57,9 +62,25 @@ export const Navbar: React.FC<NavbarProps> = ({
   canInstallPwa,
   onInstallPwa,
   onOpenAuditorModal,
+  onToggleDrawer,
+  onOpenApkGuide,
 }) => {
   const t = translations[settings.language] || translations.en;
   const isRtl = settings.language === 'ar';
+
+  const getActiveTabTitle = () => {
+    switch (currentTab) {
+      case 'receiving': return isRtl ? 'الاستلام والمطابقة' : 'Receiving';
+      case 'picking': return isRtl ? 'قائمة الانتقاء والتجهيز' : 'Wave Picking';
+      case 'audit': return isRtl ? 'المراجعة والتدقيق والباركود' : 'Dispatch Audit';
+      case 'inventory': return isRtl ? 'الجرد وتجميع العبوات' : 'Cycle Count';
+      case 'returns': return isRtl ? 'المرتجعات وفحص الجودة' : 'Returns & Lab';
+      case 'errors': return isRtl ? 'تقرير الفروقات' : 'Discrepancies';
+      case 'master': return isRtl ? 'قاعدة فواتير اليوم' : 'Master Data';
+      case 'settings': return isRtl ? 'الأدوات والمحاكي' : 'Tools & Config';
+      default: return isRtl ? 'الخدمة النشطة' : 'Active Service';
+    }
+  };
 
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-40 shadow-md">
@@ -67,6 +88,21 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="max-w-7xl mx-auto px-3 sm:px-4 py-2.5 flex items-center justify-between gap-2">
         {/* Brand & Scanner Status */}
         <div className="flex items-center gap-3">
+          {/* Vertical Services Drawer Toggle Button */}
+          {onToggleDrawer && (
+            <button
+              onClick={onToggleDrawer}
+              id="top-services-drawer-btn"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 shadow-sm transition-all active:scale-95"
+              title={isRtl ? 'فتح قائمة الخدمات الرأسية' : 'Open Vertical Services Hub'}
+            >
+              <Menu className="w-5 h-5" />
+              <span className="hidden sm:inline text-xs font-bold text-slate-200">
+                {isRtl ? 'الخدمات' : 'Services'}
+              </span>
+            </button>
+          )}
+
           <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-emerald-600 text-white font-bold shadow-inner">
             <ScanLine className="w-6 h-6 animate-pulse" />
           </div>
@@ -87,7 +123,20 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
 
         {/* Action Controls & Sync Button */}
-        <div className="flex items-center gap-2 sm:gap-3">
+        <div className="flex items-center gap-1.5 sm:gap-2">
+          {/* Android APK Guide & PDF Download Trigger */}
+          {onOpenApkGuide && (
+            <button
+              onClick={onOpenApkGuide}
+              id="navbar-apk-guide-btn"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-indigo-500/50 bg-indigo-950/50 hover:bg-indigo-900/60 text-xs font-bold text-indigo-300 transition-all shadow-sm active:scale-95"
+              title={isRtl ? 'دليل تحويل التطبيق لـ APK للأندرويد وتحميل ملف PDF' : 'Android Studio APK Build Guide & PDF Export'}
+            >
+              <Smartphone className="w-4 h-4 text-indigo-400 animate-pulse" />
+              <span className="hidden sm:inline">{isRtl ? 'تطبيق APK 📱' : 'APK Guide'}</span>
+            </button>
+          )}
+
           {/* Auditor Profile & Signature Trigger */}
           {onOpenAuditorModal && (
             <button
@@ -97,7 +146,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               title={isRtl ? 'إعدادات وهوية وتوقيع المراجع المسؤول' : 'Lead Auditor Profile & Digital Signature'}
             >
               <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="hidden sm:inline">{settings.auditorName || 'أحمد حمادة'}</span>
+              <span className="hidden lg:inline">{settings.auditorName || 'أحمد حمادة'}</span>
               <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1 py-0.2 rounded font-mono border border-emerald-800">
                 {settings.auditorId || 'AUD-101'}
               </span>
@@ -167,8 +216,33 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
       </div>
 
+      {/* Active Service Top Indicator on Mobile/Tablet */}
+      {onToggleDrawer && (
+        <div className="bg-gradient-to-r from-slate-950 via-slate-900 to-indigo-950/60 border-t border-slate-800 px-3 py-1.5 flex items-center justify-between">
+          <button
+            onClick={onToggleDrawer}
+            className="flex items-center gap-2 text-xs font-bold text-slate-300 hover:text-white transition-colors"
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping shrink-0" />
+            <span className="text-slate-400">{isRtl ? 'الخدمة النشطة للعمل:' : 'Active Workstation:'}</span>
+            <span className="text-emerald-300 font-black bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-700/50">
+              {getActiveTabTitle()}
+            </span>
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+          </button>
+
+          <button
+            onClick={onToggleDrawer}
+            className="text-[11px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center gap-1 bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-800/40"
+          >
+            <Sparkles className="w-3 h-3 text-indigo-400" />
+            <span>{isRtl ? 'تبديل الخدمة الرأسية' : 'Switch Service'}</span>
+          </button>
+        </div>
+      )}
+
       {/* Primary Navigation Tabs */}
-      <div className="bg-slate-950/90 border-t border-slate-800/80 px-2 sm:px-4">
+      <div className="bg-slate-950/90 border-t border-slate-800/80 px-2 sm:px-4 hidden sm:block">
         <nav className="max-w-7xl mx-auto flex items-center gap-1 sm:gap-2 overflow-x-auto py-1.5 scrollbar-none">
           {/* 1. Inbound Receiving */}
           <button
@@ -317,4 +391,5 @@ export const Navbar: React.FC<NavbarProps> = ({
     </header>
   );
 };
+
 

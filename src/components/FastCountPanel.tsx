@@ -16,9 +16,10 @@ import {
   Settings,
   Printer,
   ChevronRight,
-  Info
+  Info,
+  Pin
 } from 'lucide-react';
-import type { AppSettings, InventoryCountItem, PackagingGroupRule } from '../types';
+import type { AppSettings, InventoryCountItem, PackagingGroupRule, ActiveTargetColumn } from '../types';
 import { SoundEffects } from '../services/audio';
 
 interface FastCountPanelProps {
@@ -31,6 +32,8 @@ interface FastCountPanelProps {
   onAddItemToGroup: (itemCode: string, itemName?: string) => void;
   onOpenBarcodeTags: () => void;
   onOpenRulesModal: () => void;
+  activeTargetColumn?: ActiveTargetColumn;
+  onChangeTargetColumn?: (col: ActiveTargetColumn) => void;
   isRtl: boolean;
   settings: AppSettings;
 }
@@ -45,6 +48,8 @@ export const FastCountPanel: React.FC<FastCountPanelProps> = ({
   onAddItemToGroup,
   onOpenBarcodeTags,
   onOpenRulesModal,
+  activeTargetColumn = 'pieces',
+  onChangeTargetColumn,
   isRtl,
   settings,
 }) => {
@@ -78,7 +83,7 @@ export const FastCountPanel: React.FC<FastCountPanelProps> = ({
 
   const selectedItem = groupItems.find(i => i.id === selectedItemId);
 
-  // Handle Fast Scan (Group switch or Item increment)
+  // Handle Fast Scan (Group switch or Item increment according to locked target column)
   const handleFastScanSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const clean = fastScanInput.trim();
@@ -124,14 +129,21 @@ export const FastCountPanel: React.FC<FastCountPanelProps> = ({
       if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
     }
 
-    // 3. Increment item count or add to group
+    // 3. Increment item count according to locked activeTargetColumn
     const existingInGroup = groupItems.find(i => i.itemCode.toLowerCase() === clean.toLowerCase());
     if (existingInGroup) {
       setSelectedItemId(existingInGroup.id);
-      onUpdateCount(existingInGroup.id, {
-        piecesCount: existingInGroup.piecesCount + 1,
+      const updates: Partial<InventoryCountItem> = {
         lastScannedAt: new Date().toISOString()
-      });
+      };
+      if (activeTargetColumn === 'cartons') {
+        updates.cartonsCount = existingInGroup.cartonsCount + 1;
+      } else if (activeTargetColumn === 'packs') {
+        updates.packsCount = existingInGroup.packsCount + 1;
+      } else {
+        updates.piecesCount = existingInGroup.piecesCount + 1;
+      }
+      onUpdateCount(existingInGroup.id, updates);
       if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
     } else {
       // Add new item into active group
@@ -550,9 +562,64 @@ export const FastCountPanel: React.FC<FastCountPanelProps> = ({
                     <th className="p-2.5">اختيار</th>
                     <th className="p-2.5">الباركود والصنف</th>
                     <th className="p-2.5 text-center">الرصيد الدفتري</th>
-                    <th className="p-2.5 text-center text-amber-300">الكراتين (×{activeGroup.cartonFactor})</th>
-                    <th className="p-2.5 text-center text-indigo-300">الباكتات (×{activeGroup.packFactor})</th>
-                    <th className="p-2.5 text-center text-emerald-300">حبات فردية</th>
+                    
+                    {/* TOUCH CLICKABLE HEADER: Cartons */}
+                    <th 
+                      onClick={() => {
+                        if (onChangeTargetColumn) onChangeTargetColumn('cartons');
+                        if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                      }}
+                      className={`p-2.5 text-center cursor-pointer transition-all ${
+                        activeTargetColumn === 'cartons'
+                          ? 'bg-amber-500/30 text-amber-300 border-b-2 border-amber-400 font-black'
+                          : 'text-amber-300/80 hover:bg-slate-800 hover:text-amber-300'
+                      }`}
+                      title="المس لتثبيت تسجيل المسح في عمود الكراتين"
+                    >
+                      <div className="flex items-center justify-center gap-1">
+                        {activeTargetColumn === 'cartons' && <Pin className="w-3 h-3 text-amber-400 animate-bounce" />}
+                        <span>الكراتين (×{activeGroup.cartonFactor})</span>
+                      </div>
+                    </th>
+
+                    {/* TOUCH CLICKABLE HEADER: Packs */}
+                    <th 
+                      onClick={() => {
+                        if (onChangeTargetColumn) onChangeTargetColumn('packs');
+                        if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                      }}
+                      className={`p-2.5 text-center cursor-pointer transition-all ${
+                        activeTargetColumn === 'packs'
+                          ? 'bg-indigo-500/30 text-indigo-200 border-b-2 border-indigo-400 font-black'
+                          : 'text-indigo-300/80 hover:bg-slate-800 hover:text-indigo-300'
+                      }`}
+                      title="المس لتثبيت تسجيل المسح في عمود الباكتات"
+                    >
+                      <div className="flex items-center justify-center gap-1">
+                        {activeTargetColumn === 'packs' && <Pin className="w-3 h-3 text-indigo-400 animate-bounce" />}
+                        <span>الباكتات (×{activeGroup.packFactor})</span>
+                      </div>
+                    </th>
+
+                    {/* TOUCH CLICKABLE HEADER: Loose Pieces */}
+                    <th 
+                      onClick={() => {
+                        if (onChangeTargetColumn) onChangeTargetColumn('pieces');
+                        if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                      }}
+                      className={`p-2.5 text-center cursor-pointer transition-all ${
+                        activeTargetColumn === 'pieces'
+                          ? 'bg-emerald-500/30 text-emerald-200 border-b-2 border-emerald-400 font-black'
+                          : 'text-emerald-300/80 hover:bg-slate-800 hover:text-emerald-300'
+                      }`}
+                      title="المس لتثبيت تسجيل المسح في عمود الحبات"
+                    >
+                      <div className="flex items-center justify-center gap-1">
+                        {activeTargetColumn === 'pieces' && <Pin className="w-3 h-3 text-emerald-400 animate-bounce" />}
+                        <span>حبات فردية</span>
+                      </div>
+                    </th>
+
                     <th className="p-2.5 text-center font-bold text-white bg-slate-900">الفعلي المحتسب</th>
                     <th className="p-2.5 text-center">الفارق</th>
                     <th className="p-2.5 text-center">الحالة</th>

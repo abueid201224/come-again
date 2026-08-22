@@ -57,6 +57,7 @@ import {
   getOverdueLabReportsCount 
 } from '../services/db';
 import { SoundEffects } from '../services/audio';
+import { ReopenConfirmationModal } from './ReopenConfirmationModal';
 
 interface ReturnsScreenProps {
   settings: AppSettings;
@@ -118,6 +119,20 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
   const [officerRole, setOfficerRole] = useState<'FINANCE' | 'RETURNS_MGR' | 'STORE_MGR'>('FINANCE');
   const [emailCopiedNotice, setEmailCopiedNotice] = useState(false);
 
+  // Reopen Confirmation Prompt State (الموافقة المشروطة لإعادة فتح المستندات المكتملة)
+  const [reopenPrompt, setReopenPrompt] = useState<{
+    isOpen: boolean;
+    report: ReturnReport | null;
+    type: 'RETURN' | 'REFUND';
+  }>({
+    isOpen: false,
+    report: null,
+    type: 'RETURN',
+  });
+
+  // Read-only Details View Modal
+  const [viewingReportModal, setViewingReportModal] = useState<ReturnReport | null>(null);
+
   // Handle Order Number manual input or paste (auto-formats returnReceiptNo as new+orderNo)
   const handleOrderNoChange = (val: string) => {
     setOrderNo(val);
@@ -125,6 +140,25 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
     if (receipt) {
       setReturnReceiptNo(receipt);
     }
+  };
+
+  // Reopen approved document for modifications
+  const handleConfirmReopen = () => {
+    if (!reopenPrompt.report) return;
+    const target = reopenPrompt.report;
+
+    setReturnReceiptNo(target.returnReceiptNo);
+    setOriginalInvoiceNo(target.originalInvoiceNo);
+    setOrderNo(target.orderNo || '');
+    setCustomerName(target.customerName || '');
+    setPaymentMethod(target.paymentMethod || 'CASH');
+    setReturnItems(target.items ? JSON.parse(JSON.stringify(target.items)) : []);
+    setGeneralNotes(target.notes || '');
+
+    setReopenPrompt({ isOpen: false, report: null, type: 'RETURN' });
+    setActiveSubTab('editor');
+
+    if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
   };
 
   // Load saved return reports
@@ -1291,6 +1325,7 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                       <th className="p-2.5 text-center">إجمالي الكمية</th>
                       <th className="p-2.5 text-center">إجمالي مبلغ الاسترداد</th>
                       <th className="p-2.5 text-center">حالة الاسترداد</th>
+                      <th className="p-2.5 text-center">عرض وإعادة الفتح</th>
                       <th className="p-2.5">المراجع وتاريخ الاعتماد</th>
                     </tr>
                   </thead>
@@ -1299,9 +1334,15 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                       <tr key={rep.id} className="hover:bg-slate-800/40 transition-colors">
                         <td className="p-2.5 text-center font-mono text-slate-500">{idx + 1}</td>
                         <td className="p-2.5">
-                          <div className="font-bold text-white font-mono">{rep.originalInvoiceNo}</div>
+                          <button
+                            onClick={() => setViewingReportModal(rep)}
+                            className="font-bold text-amber-400 hover:text-amber-300 font-mono text-right hover:underline"
+                            title="فتح المستند للعرض"
+                          >
+                            {rep.originalInvoiceNo}
+                          </button>
                           {rep.orderNo && <div className="text-[11px] text-slate-400 font-mono">طلب: {rep.orderNo}</div>}
-                          <div className="text-[10px] text-amber-400 font-mono">إذن: {rep.returnReceiptNo}</div>
+                          <div className="text-[10px] text-slate-400 font-mono">إذن: {rep.returnReceiptNo}</div>
                         </td>
                         <td className="p-2.5 font-semibold text-slate-200">
                           {rep.customerName}
@@ -1327,6 +1368,30 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                             <CheckCircle2 className="w-3 h-3" />
                             <span>معتمد ومكتمل</span>
                           </span>
+                        </td>
+                        <td className="p-2.5 text-center">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              onClick={() => setViewingReportModal(rep)}
+                              className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-700 rounded-lg text-[11px] font-bold flex items-center gap-1"
+                              title="عرض تفاصيل الطلب"
+                            >
+                              <Eye className="w-3 h-3" />
+                              <span>فتح</span>
+                            </button>
+                            <button
+                              onClick={() => setReopenPrompt({
+                                isOpen: true,
+                                report: rep,
+                                type: 'REFUND'
+                              })}
+                              className="px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-[11px] font-bold flex items-center gap-1 shadow-sm transition-all"
+                              title="طلب إعادة فتح المستند المكتمل"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              <span>إعادة الفتح</span>
+                            </button>
+                          </div>
                         </td>
                         <td className="p-2.5 text-[11px] text-slate-400">
                           <div>{rep.auditorName} ({rep.auditorId})</div>
@@ -1377,7 +1442,14 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                 <div key={rep.id} className="p-4 bg-slate-950/80 border border-slate-800 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3">
                   <div className="space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono font-bold text-emerald-400 text-sm">{rep.returnReceiptNo}</span>
+                      <button
+                        onClick={() => setViewingReportModal(rep)}
+                        className="font-mono font-bold text-emerald-400 hover:text-emerald-300 text-sm underline flex items-center gap-1"
+                        title="فتح رابط المستند للعرض"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>{rep.returnReceiptNo}</span>
+                      </button>
                       <span className="text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded font-mono">
                         فاتورة: {rep.originalInvoiceNo}
                       </span>
@@ -1398,6 +1470,30 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                   </div>
 
                   <div className="flex items-center gap-2">
+                    {/* View Details Link */}
+                    <button
+                      onClick={() => setViewingReportModal(rep)}
+                      className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-blue-300 border border-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 transition-all"
+                      title="فتح المستند"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>فتح</span>
+                    </button>
+
+                    {/* Reopen Button */}
+                    <button
+                      onClick={() => setReopenPrompt({
+                        isOpen: true,
+                        report: rep,
+                        type: 'RETURN'
+                      })}
+                      className="px-2.5 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all"
+                      title="طلب إعادة فتح المستند المكتمل للتعديل"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+                      <span>إعادة الفتح</span>
+                    </button>
+
                     <button
                       onClick={() => exportReturnReportToExcel(rep)}
                       className="p-2 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded-lg text-xs font-semibold"
@@ -1780,6 +1876,150 @@ ${methodLines || 'لا توجد طلبات مسجلة'}
           </div>
         );
       })()}
+
+      {/* 9. REOPEN CONFIRMATION MODAL (شرط الموافقة عند فتح مستند تم إنهاؤه: نعم - لا - إلغاء) */}
+      <ReopenConfirmationModal
+        isOpen={reopenPrompt.isOpen}
+        onClose={() => setReopenPrompt({ isOpen: false, report: null, type: 'RETURN' })}
+        onDeny={() => {
+          setReopenPrompt({ isOpen: false, report: null, type: 'RETURN' });
+        }}
+        onConfirm={handleConfirmReopen}
+        documentTitle={reopenPrompt.report ? `${reopenPrompt.report.returnReceiptNo} (فاتورة ${reopenPrompt.report.originalInvoiceNo})` : ''}
+        documentTypeLabel={reopenPrompt.type === 'REFUND' ? 'طلب استرداد مالي' : 'تقرير مرتجع مستودع'}
+        isRtl={isRtl}
+      />
+
+      {/* 10. READ-ONLY DOCUMENT DETAILS VIEW MODAL (عرض تفاصيل المستند) */}
+      {viewingReportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-3xl w-full p-5 sm:p-6 shadow-2xl space-y-4 my-6 text-right" dir="rtl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-emerald-500/20 text-emerald-400 rounded-xl">
+                  <FileCheck2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-white">
+                    تفاصيل مستند المرتجع: <span className="font-mono text-emerald-400">{viewingReportModal.returnReceiptNo}</span>
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    فاتورة: {viewingReportModal.originalInvoiceNo} | العميل: {viewingReportModal.customerName} | الدفع: {viewingReportModal.paymentMethod}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setViewingReportModal(null)}
+                className="p-1.5 text-slate-400 hover:text-white rounded-lg bg-slate-800 hover:bg-slate-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Items Table */}
+            <div className="overflow-x-auto max-h-72 border border-slate-800 rounded-xl">
+              <table className="w-full text-xs text-slate-300 text-right">
+                <thead className="bg-slate-950 text-slate-400 font-bold border-b border-slate-800">
+                  <tr>
+                    <th className="p-2.5 text-center w-8">#</th>
+                    <th className="p-2.5">كود الصنف والاسم</th>
+                    <th className="p-2.5 text-center">الكمية بالفاتورة</th>
+                    <th className="p-2.5 text-center">المرتجع الفعلي</th>
+                    <th className="p-2.5 text-center">سعر الوحدة</th>
+                    <th className="p-2.5 text-center">إجمالي الاسترداد</th>
+                    <th className="p-2.5 text-center">حالة الفحص</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {(viewingReportModal.items || []).map((item, idx) => (
+                    <tr key={item.id || idx} className="hover:bg-slate-800/30">
+                      <td className="p-2.5 text-center font-mono text-slate-500">{idx + 1}</td>
+                      <td className="p-2.5">
+                        <div className="font-bold text-white font-mono">{item.itemCode}</div>
+                        <div className="text-[11px] text-slate-400">{item.itemName}</div>
+                      </td>
+                      <td className="p-2.5 text-center font-mono">{item.invoicedQty} {item.unit}</td>
+                      <td className="p-2.5 text-center font-mono font-bold text-emerald-400">{item.actualReturnedQty} {item.unit}</td>
+                      <td className="p-2.5 text-center font-mono">{item.unitPrice}</td>
+                      <td className="p-2.5 text-center font-mono font-bold text-white">{(item.refundTotal || 0).toFixed(2)}</td>
+                      <td className="p-2.5 text-center">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                          item.condition === 'VALID_FOR_RESTOCK' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-amber-950 text-amber-300 border border-amber-800'
+                        }`}>
+                          {item.condition === 'VALID_FOR_RESTOCK' ? 'صالح للمستودع' : 'محول للمعمل'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Summary details */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs bg-slate-950 p-3 rounded-xl border border-slate-800 text-center">
+              <div>
+                <span className="text-slate-400 block">إجمالي القطع المرتجعة</span>
+                <strong className="text-white text-sm font-mono">{viewingReportModal.totalReturnedQty}</strong>
+              </div>
+              <div>
+                <span className="text-slate-400 block">إجمالي الاسترداد المالي</span>
+                <strong className="text-emerald-400 text-sm font-mono">{(viewingReportModal.totalRefundAmount || 0).toFixed(2)}</strong>
+              </div>
+              <div>
+                <span className="text-slate-400 block">المراجع المسؤول</span>
+                <strong className="text-slate-200">{viewingReportModal.auditorName}</strong>
+              </div>
+              <div>
+                <span className="text-slate-400 block">تاريخ الاعتماد</span>
+                <strong className="text-slate-300">{new Date(viewingReportModal.createdAt).toLocaleDateString('ar-EG')}</strong>
+              </div>
+            </div>
+
+            {/* Modal actions */}
+            <div className="flex items-center justify-between pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  const rep = viewingReportModal;
+                  setViewingReportModal(null);
+                  setReopenPrompt({ isOpen: true, report: rep, type: 'RETURN' });
+                }}
+                className="px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-xl text-xs font-bold flex items-center gap-1.5"
+              >
+                <RotateCcw className="w-4 h-4 text-amber-400" />
+                <span>طلب إعادة الفتح للتعديل</span>
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => exportReturnReportToExcel(viewingReportModal)}
+                  className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded-xl text-xs font-bold flex items-center gap-1"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>تصدير Excel</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => exportReturnReportToPdf(viewingReportModal)}
+                  className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-red-400 rounded-xl text-xs font-bold flex items-center gap-1"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>تصدير PDF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewingReportModal(null)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold"
+                >
+                  إغلاق
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

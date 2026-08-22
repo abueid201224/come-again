@@ -13,6 +13,7 @@ import {
   Printer,
   Boxes,
   Plus,
+  Minus,
   Trash2,
   Edit3,
   Search,
@@ -25,7 +26,14 @@ import {
   RefreshCw,
   Sliders,
   Eye,
-  Info
+  Info,
+  Pin,
+  Lock,
+  Unlock,
+  X,
+  FileCheck,
+  ShieldCheck,
+  Sparkle
 } from 'lucide-react';
 import type { 
   AppSettings, 
@@ -35,7 +43,9 @@ import type {
   PackagingGroupRule,
   WorkerExperienceLevel,
   GroupDifficultyLevel,
-  AggregatedPickingItem
+  AggregatedPickingItem,
+  ActiveTargetColumn,
+  DocumentReopenPrompt
 } from '../types';
 import { 
   parseMultiInvoicePickingExcel, 
@@ -53,10 +63,13 @@ import {
   getAllPickingWaves, 
   savePickingWave, 
   deletePickingWave,
-  getPackagingGroupRules
+  getPackagingGroupRules,
+  matchBarcodeToPackagingRule
 } from '../services/db';
 import { SoundEffects } from '../services/audio';
 import { PackagingRulesModal } from './PackagingRulesModal';
+import { ReopenConfirmationModal } from './ReopenConfirmationModal';
+import { PreReportAuditModal } from './PreReportAuditModal';
 
 interface PickingWaveScreenProps {
   settings: AppSettings;
@@ -80,10 +93,29 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
   const [isRulesModalOpen, setIsRulesModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedGroupFilter, setSelectedGroupFilter] = useState<string>('ALL');
-  const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
   const [selectedItemForDetails, setSelectedItemForDetails] = useState<AggregatedPickingItem | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [actionNotice, setActionNotice] = useState<{ message: string; type: 'SUCCESS' | 'INFO' | 'WARNING' } | null>(null);
+
+  // Manual Review & Edit Mode before Final Report Generation
+  const [isManualEditMode, setIsManualEditMode] = useState<boolean>(true);
+  const [isPreReportAuditModalOpen, setIsPreReportAuditModalOpen] = useState<boolean>(false);
+
+  // Touch column header locking
+  const [activeTargetColumn, setActiveTargetColumn] = useState<ActiveTargetColumn>('pieces');
+
+  // Reopen security modal state
+  const [reopenPrompt, setReopenPrompt] = useState<DocumentReopenPrompt | null>(null);
+  const [viewingWave, setViewingWave] = useState<BatchPickingWave | null>(null);
+
+  // Manual Item Add Modal for a Group
+  const [addingToGroupId, setAddingToGroupId] = useState<string | null>(null);
+  const [newItemCode, setNewItemCode] = useState('');
+  const [newItemName, setNewItemName] = useState('');
+  const [newItemUnit, setNewItemUnit] = useState('PCS');
+  const [newItemQty, setNewItemQty] = useState(1);
+  const [newItemCartonFactor, setNewItemCartonFactor] = useState(24);
+  const [newItemPackFactor, setNewItemPackFactor] = useState(6);
 
   // New Worker Form State
   const [newWorkerName, setNewWorkerName] = useState('');
@@ -108,13 +140,66 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
     setPackagingRules(rulesList);
     setSavedWaves(wavesList);
 
-    // If there is a saved wave, set the most recent one as active
     if (wavesList.length > 0 && !activeWave) {
       setActiveWave(wavesList[0]);
     }
   };
 
-  // Hardware Scanner Integration for Active Picking Wave
+  const showNotice = (message: string, type: 'SUCCESS' | 'INFO' | 'WARNING' = 'INFO') => {
+    setActionNotice({ message, type });
+    setTimeout(() => setActionNotice(null), 4000);
+  };
+
+  // Recalculate group and wave summary statistics
+  const recalculateWaveTotals = (wave: BatchPickingWave): BatchPickingWave => {
+    const updatedGroups = wave.groups.map(group => {
+      let gQty = 0;
+      let gCartons = 0;
+      let gPacks = 0;
+      let gPieces = 0;
+
+      group.items.forEach(it => {
+        gQty += it.totalRequiredQty;
+        gCartons += it.cartonsCount || 0;
+        gPacks += it.packsCount || 0;
+        gPieces += it.piecesCount || 0;
+      });
+
+      return {
+        ...group,
+        totalQty: gQty,
+        totalCartons: gCartons,
+        totalPacks: gPacks,
+        totalPieces: gPieces,
+      };
+    });
+
+    let waveQty = 0;
+    let waveCartons = 0;
+    let wavePacks = 0;
+    let wavePieces = 0;
+    let waveItems = 0;
+
+    updatedGroups.forEach(g => {
+      waveQty += g.totalQty;
+      waveCartons += g.totalCartons;
+      wavePacks += g.totalPacks;
+      wavePieces += g.totalPieces;
+      waveItems += g.items.length;
+    });
+
+    return {
+      ...wave,
+      groups: updatedGroups,
+      totalQuantity: waveQty,
+      totalCartons: waveCartons,
+      totalPacks: wavePacks,
+      totalPieces: wavePieces,
+      totalItemsCount: waveItems,
+    };
+  };
+
+  // Hardware Scanner Integration for Active Picking Wave with Active Column Locking
   useEffect(() => {
     if (!lastScannedCode || !activeWave || activeSubTab !== 'wave') return;
     const clean = lastScannedCode.trim().toLowerCase();
@@ -125,7 +210,22 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
       const updatedItems = group.items.map(item => {
         if (item.itemCode.toLowerCase() === clean) {
           itemFound = true;
-          const nextPicked = Math.min(item.totalRequiredQty, item.pickedQty + 1);
+          const cFactor = item.cartonFactor || 24;
+          const pFactor = item.packFactor || 6;
+
+          let incQty = 1;
+          if (activeTargetColumn === 'cartons') {
+            incQty = cFactor;
+            item.cartonsCount = (item.cartonsCount || 0) + 1;
+          } else if (activeTargetColumn === 'packs') {
+            incQty = pFactor;
+            item.packsCount = (item.packsCount || 0) + 1;
+          } else {
+            incQty = 1;
+            item.piecesCount = (item.piecesCount || 0) + 1;
+          }
+
+          const nextPicked = Math.min(item.totalRequiredQty, item.pickedQty + incQty);
           return {
             ...item,
             pickedQty: nextPicked,
@@ -151,11 +251,12 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
         groups: updatedGroups,
         status: updatedGroups.every(g => g.status === 'COMPLETED') ? 'COMPLETED' : 'IN_PROGRESS'
       };
-      setActiveWave(updatedWave);
-      savePickingWave(updatedWave);
+      const finalWave = recalculateWaveTotals(updatedWave);
+      setActiveWave(finalWave);
+      savePickingWave(finalWave);
       if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
       showNotice(
-        isRtl ? `✅ تم تسجيل التقاط قطعة للصنف (${clean})` : `✅ Picked 1 piece of item (${clean})`,
+        isRtl ? `✅ تم تسجيل التقاط الصنف (${clean})` : `✅ Picked item (${clean})`,
         'SUCCESS'
       );
     } else {
@@ -165,12 +266,7 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
         'WARNING'
       );
     }
-  }, [lastScannedCode]);
-
-  const showNotice = (message: string, type: 'SUCCESS' | 'INFO' | 'WARNING' = 'INFO') => {
-    setActionNotice({ message, type });
-    setTimeout(() => setActionNotice(null), 4000);
-  };
+  }, [lastScannedCode, activeTargetColumn]);
 
   // Handle Multi-Invoice Excel Upload
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -198,7 +294,6 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
         status: 'DRAFT',
       };
 
-      // Perform initial smart auto-assignment to available workers
       const assignedWave = performSmartWorkerAssignment(newWave, workers);
       setActiveWave(assignedWave);
       await savePickingWave(assignedWave);
@@ -208,8 +303,8 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
       if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
       showNotice(
         isRtl 
-          ? `🎉 تم تكوين قائمة الانتقاء وتجميع ${result.totalQuantity} قطعة من ${result.totalInvoicesCount} فواتير وتفصيلها إلى ${result.groups.length} مجموعات!`
-          : `🎉 Successfully created wave with ${result.totalQuantity} items across ${result.totalInvoicesCount} invoices!`,
+          ? `🎉 تم تكوين قائمة الانتقاء وتجميع ${result.totalQuantity} قطعة من ${result.totalInvoicesCount} فواتير!`
+          : `🎉 Created wave with ${result.totalQuantity} items across ${result.totalInvoicesCount} invoices!`,
         'SUCCESS'
       );
     } catch (err: any) {
@@ -238,7 +333,6 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
       let chosenWorker: WarehouseWorker | null = null;
 
       if (group.difficulty === 'HIGH_EXPERT') {
-        // Prefer Expert, fallback to Intermediate, then Novice
         if (experts.length > 0) {
           chosenWorker = experts[expIdx % experts.length];
           expIdx++;
@@ -249,7 +343,6 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
           chosenWorker = activeWorkers[0];
         }
       } else if (group.difficulty === 'MEDIUM_INTERMEDIATE') {
-        // Prefer Intermediate, fallback to Expert, then Novice
         if (intermediates.length > 0) {
           chosenWorker = intermediates[intIdx % intermediates.length];
           intIdx++;
@@ -263,7 +356,6 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
           chosenWorker = activeWorkers[0];
         }
       } else {
-        // LOW_NOVICE: Prefer Novice, fallback to Intermediate
         if (novices.length > 0) {
           chosenWorker = novices[novIdx % novices.length];
           novIdx++;
@@ -295,7 +387,7 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
     const updated = performSmartWorkerAssignment(activeWave, workers);
     setActiveWave(updated);
     await savePickingWave(updated);
-    showNotice(isRtl ? '✅ تم إعادة الإسناد الذكي للعمال بنجاح وفق مستويات الخبرة والصعوبة' : '✅ Smart Worker Assignment Applied', 'SUCCESS');
+    showNotice(isRtl ? '✅ تم إعادة الإسناد الذكي للعمال بنجاح' : '✅ Smart Worker Assignment Applied', 'SUCCESS');
   };
 
   // Manual worker change for a specific group
@@ -341,6 +433,212 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
     await savePickingWave(updatedWave);
   };
 
+  // Manual Item Edit (Required Qty, Cartons, Packs, Pieces, Picked Qty)
+  const handleUpdateWaveItem = async (groupId: string, itemId: string, updates: Partial<AggregatedPickingItem>) => {
+    if (!activeWave) return;
+
+    const updatedGroups = activeWave.groups.map(group => {
+      if (group.groupId === groupId) {
+        const updatedItems = group.items.map(item => {
+          if (item.id === itemId) {
+            const merged = { ...item, ...updates };
+            const cFactor = merged.cartonFactor || 24;
+            const pFactor = merged.packFactor || 6;
+
+            // If user updated cartons/packs/pieces manually, recompute total required if desired
+            if (updates.cartonsCount !== undefined || updates.packsCount !== undefined || updates.piecesCount !== undefined) {
+              const c = merged.cartonsCount || 0;
+              const p = merged.packsCount || 0;
+              const loose = merged.piecesCount || 0;
+              merged.totalRequiredQty = (c * cFactor) + (p * pFactor) + loose;
+            } else if (updates.totalRequiredQty !== undefined) {
+              // If user updated totalRequiredQty, auto-breakdown packaging
+              const tot = merged.totalRequiredQty;
+              merged.cartonsCount = Math.floor(tot / cFactor);
+              const rem = tot % cFactor;
+              merged.packsCount = Math.floor(rem / pFactor);
+              merged.piecesCount = rem % pFactor;
+            }
+
+            merged.status = merged.pickedQty >= merged.totalRequiredQty ? 'COMPLETED' : merged.pickedQty > 0 ? 'IN_PROGRESS' : 'PENDING';
+            return merged;
+          }
+          return item;
+        });
+
+        return {
+          ...group,
+          items: updatedItems,
+        };
+      }
+      return group;
+    });
+
+    const recalculated = recalculateWaveTotals({ ...activeWave, groups: updatedGroups });
+    setActiveWave(recalculated);
+    await savePickingWave(recalculated);
+  };
+
+  // Re-balance packaging breakdown for a single item (calculate Cartons, Packs, Pieces from Required Qty)
+  const handleRebalanceSingleItem = async (groupId: string, itemId: string) => {
+    if (!activeWave) return;
+    const group = activeWave.groups.find(g => g.groupId === groupId);
+    const item = group?.items.find(i => i.id === itemId);
+    if (!item) return;
+
+    const cFactor = item.cartonFactor || 24;
+    const pFactor = item.packFactor || 6;
+    const tot = item.totalRequiredQty;
+
+    const cCount = Math.floor(tot / cFactor);
+    const rem = tot % cFactor;
+    const pCount = Math.floor(rem / pFactor);
+    const pieces = rem % pFactor;
+
+    await handleUpdateWaveItem(groupId, itemId, {
+      cartonsCount: cCount,
+      packsCount: pCount,
+      piecesCount: pieces,
+    });
+    showNotice(isRtl ? `⚡ تم إعادة موازنة عبوات الصنف (${item.itemCode}) تلقائياً` : 'Packaging re-balanced', 'SUCCESS');
+  };
+
+  // Quick adjust quantity (+10, -10, +1, -1) and auto-balance
+  const handleQuickAdjustItemQty = async (groupId: string, itemId: string, delta: number) => {
+    if (!activeWave) return;
+    const group = activeWave.groups.find(g => g.groupId === groupId);
+    const item = group?.items.find(i => i.id === itemId);
+    if (!item) return;
+
+    const newTot = Math.max(1, item.totalRequiredQty + delta);
+    const cFactor = item.cartonFactor || 24;
+    const pFactor = item.packFactor || 6;
+
+    const cCount = Math.floor(newTot / cFactor);
+    const rem = newTot % cFactor;
+    const pCount = Math.floor(rem / pFactor);
+    const pieces = rem % pFactor;
+
+    await handleUpdateWaveItem(groupId, itemId, {
+      totalRequiredQty: newTot,
+      cartonsCount: cCount,
+      packsCount: pCount,
+      piecesCount: pieces,
+    });
+  };
+
+  // Re-balance all packaging across the entire wave
+  const handleRebalanceAllPackaging = async () => {
+    if (!activeWave) return;
+    const updatedGroups = activeWave.groups.map(group => {
+      const updatedItems = group.items.map(item => {
+        const cFactor = item.cartonFactor || 24;
+        const pFactor = item.packFactor || 6;
+        const tot = item.totalRequiredQty;
+
+        const cCount = Math.floor(tot / cFactor);
+        const rem = tot % cFactor;
+        const pCount = Math.floor(rem / pFactor);
+        const pieces = rem % pFactor;
+
+        return {
+          ...item,
+          cartonsCount: cCount,
+          packsCount: pCount,
+          piecesCount: pieces,
+        };
+      });
+
+      return {
+        ...group,
+        items: updatedItems,
+      };
+    });
+
+    const recalculated = recalculateWaveTotals({ ...activeWave, groups: updatedGroups });
+    setActiveWave(recalculated);
+    await savePickingWave(recalculated);
+    showNotice(isRtl ? '⚡ تم إعادة موازنة احتساب العبوات لكافة الأصناف بالموجة بنجاح!' : 'All packaging rebalanced successfully!', 'SUCCESS');
+  };
+
+  // Add Item Manually to a Wave Group
+  const handleAddItemToGroup = async () => {
+    if (!activeWave || !addingToGroupId || !newItemCode.trim()) return;
+
+    const cleanCode = newItemCode.trim();
+    const cFactor = newItemCartonFactor || 24;
+    const pFactor = newItemPackFactor || 6;
+    const totQty = Math.max(1, newItemQty);
+
+    const cCount = Math.floor(totQty / cFactor);
+    const rem = totQty % cFactor;
+    const pCount = Math.floor(rem / pFactor);
+    const pieces = rem % pFactor;
+
+    const newItem: AggregatedPickingItem = {
+      id: `pick-item-${Date.now()}`,
+      itemCode: cleanCode,
+      itemName: newItemName.trim() || `صنف مضاف ${cleanCode}`,
+      unit: newItemUnit || 'PCS',
+      groupId: addingToGroupId,
+      groupName: activeWave.groups.find(g => g.groupId === addingToGroupId)?.groupName || 'مجموعة',
+      totalRequiredQty: totQty,
+      pickedQty: 0,
+      cartonFactor: cFactor,
+      packFactor: pFactor,
+      cartonsCount: cCount,
+      packsCount: pCount,
+      piecesCount: pieces,
+      invoiceSources: [{
+        invoiceNo: 'MANUAL',
+        customerName: 'إضافة يدوية',
+        qty: totQty,
+      }],
+      status: 'PENDING',
+    };
+
+    const updatedGroups = activeWave.groups.map(g => {
+      if (g.groupId === addingToGroupId) {
+        return {
+          ...g,
+          items: [...g.items, newItem],
+        };
+      }
+      return g;
+    });
+
+    const recalculated = recalculateWaveTotals({ ...activeWave, groups: updatedGroups });
+    setActiveWave(recalculated);
+    await savePickingWave(recalculated);
+
+    // Reset form
+    setAddingToGroupId(null);
+    setNewItemCode('');
+    setNewItemName('');
+    setNewItemQty(1);
+    showNotice(isRtl ? '✅ تم إضافة الصنف بنجاح لقائمة الانتقاء' : '✅ Item added to picking wave', 'SUCCESS');
+  };
+
+  // Remove Item from Wave Group
+  const handleRemoveItemFromGroup = async (groupId: string, itemId: string) => {
+    if (!activeWave) return;
+
+    const updatedGroups = activeWave.groups.map(g => {
+      if (g.groupId === groupId) {
+        return {
+          ...g,
+          items: g.items.filter(it => it.id !== itemId),
+        };
+      }
+      return g;
+    });
+
+    const recalculated = recalculateWaveTotals({ ...activeWave, groups: updatedGroups });
+    setActiveWave(recalculated);
+    await savePickingWave(recalculated);
+    showNotice(isRtl ? 'تم حذف الصنف من القائمة' : 'Item removed', 'INFO');
+  };
+
   // Mark an item as picked or toggle status
   const handleToggleItemPicked = async (groupId: string, itemId: string) => {
     if (!activeWave) return;
@@ -367,16 +665,56 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
       return g;
     });
 
-    const updatedWave: BatchPickingWave = {
-      ...activeWave,
-      groups: updatedGroups,
-    };
+    const updatedWave = recalculateWaveTotals({ ...activeWave, groups: updatedGroups });
     setActiveWave(updatedWave);
     await savePickingWave(updatedWave);
     if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
   };
 
-  // Add or Edit Worker
+  // Save / Approve / Lock Wave
+  const handleLockWave = async () => {
+    if (!activeWave) return;
+    const lockedWave: BatchPickingWave = {
+      ...activeWave,
+      status: 'COMPLETED',
+    };
+    await savePickingWave(lockedWave);
+    const updatedList = await getAllPickingWaves();
+    setSavedWaves(updatedList);
+    setActiveWave(lockedWave);
+    if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
+    showNotice(isRtl ? `🔒 تم اعتماد وقفل موجة الانتقاء (${activeWave.waveNo}) بنجاح!` : `Locked wave ${activeWave.waveNo}`, 'SUCCESS');
+  };
+
+  // Re-open Request Handler for Completed Wave
+  const handleRequestReopenWave = (wave: BatchPickingWave) => {
+    setReopenPrompt({
+      isOpen: true,
+      documentType: 'PICKING',
+      documentId: wave.id,
+      documentNo: wave.waveNo,
+      title: `قائمة وموجة انتقال رقم ${wave.waveNo} (${wave.title})`,
+      onConfirm: () => handleConfirmReopenWave(wave),
+    });
+  };
+
+  // Confirm Re-open Wave
+  const handleConfirmReopenWave = async (wave: BatchPickingWave) => {
+    const unlocked: BatchPickingWave = {
+      ...wave,
+      status: 'IN_PROGRESS',
+    };
+    await savePickingWave(unlocked);
+    const updatedList = await getAllPickingWaves();
+    setSavedWaves(updatedList);
+    setActiveWave(unlocked);
+    setActiveSubTab('wave');
+    setReopenPrompt(null);
+    if (settings.soundEnabled) SoundEffects.playInvoiceUnlock(settings.soundVolume);
+    showNotice(isRtl ? `🔓 تمت إعادة فتح موجة الانتقاء (${wave.waveNo}) للتعديل اليدوي` : `Wave ${wave.waveNo} unlocked for editing`, 'SUCCESS');
+  };
+
+  // Worker CRUD
   const handleSaveWorker = async () => {
     if (!newWorkerName.trim()) {
       showNotice(isRtl ? 'يرجى إدخال اسم العامل' : 'Please enter worker name', 'WARNING');
@@ -405,24 +743,25 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
         name: newWorkerName.trim(),
         code,
         experienceLevel: newWorkerLevel,
-        isActive: true,
         specialty: newWorkerSpecialty.trim(),
         phone: newWorkerPhone.trim(),
+        isActive: true,
         createdAt: new Date().toISOString(),
       };
       await addWarehouseWorker(newWorker);
-      showNotice(isRtl ? '✅ تم إضافة عامل تجهيز جديد' : 'Worker Added', 'SUCCESS');
+      showNotice(isRtl ? '✅ تم إضافة العامل بنجاح' : 'Worker Added', 'SUCCESS');
     }
 
     // Reset Form
+    setEditingWorkerId(null);
     setNewWorkerName('');
     setNewWorkerCode('');
     setNewWorkerLevel('INTERMEDIATE');
     setNewWorkerSpecialty('');
     setNewWorkerPhone('');
-    setEditingWorkerId(null);
-    const updated = await getWarehouseWorkers();
-    setWorkers(updated);
+
+    const updatedWorkers = await getWarehouseWorkers();
+    setWorkers(updatedWorkers);
   };
 
   const handleEditWorker = (worker: WarehouseWorker) => {
@@ -432,120 +771,120 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
     setNewWorkerLevel(worker.experienceLevel);
     setNewWorkerSpecialty(worker.specialty || '');
     setNewWorkerPhone(worker.phone || '');
+    setActiveSubTab('workers');
   };
 
-  const handleDeleteWorker = async (id: string) => {
-    if (window.confirm(isRtl ? 'هل أنت متأكد من حذف هذا العامل؟' : 'Delete this worker?')) {
-      await deleteWarehouseWorker(id);
+  const handleDeleteWorker = async (workerId: string) => {
+    if (confirm(isRtl ? 'هل أنت متأكد من حذف هذا العامل؟' : 'Delete this worker?')) {
+      await deleteWarehouseWorker(workerId);
       const updated = await getWarehouseWorkers();
       setWorkers(updated);
-      showNotice(isRtl ? 'تم حذف العامل' : 'Worker Deleted', 'INFO');
+      showNotice(isRtl ? 'تم حذف العامل' : 'Worker deleted', 'INFO');
     }
   };
 
   const handleToggleWorkerStatus = async (worker: WarehouseWorker) => {
-    const updated: WarehouseWorker = { ...worker, isActive: !worker.isActive };
+    const updated = { ...worker, isActive: !worker.isActive };
     await updateWarehouseWorker(updated);
     const list = await getWarehouseWorkers();
     setWorkers(list);
   };
 
-  // Helper for Experience Badge Styles
+  // Experience level badge helper
   const getExperienceBadge = (level: WorkerExperienceLevel) => {
     switch (level) {
       case 'EXPERT':
         return (
-          <span className="bg-red-950/80 text-red-300 border border-red-800/80 px-2 py-0.5 rounded-md text-[11px] font-black inline-flex items-center gap-1">
-            <Award className="w-3 h-3 text-red-400" />
-            {isRtl ? 'خبير تجهيز' : 'Expert'}
+          <span className="bg-amber-950/80 text-amber-300 border border-amber-700/70 px-2.5 py-0.5 rounded-full text-[11px] font-bold flex items-center gap-1">
+            <Award className="w-3.5 h-3.5 text-amber-400" />
+            <span>{isRtl ? 'عامل خبير' : 'Expert'}</span>
           </span>
         );
       case 'INTERMEDIATE':
         return (
-          <span className="bg-amber-950/80 text-amber-300 border border-amber-800/80 px-2 py-0.5 rounded-md text-[11px] font-bold inline-flex items-center gap-1">
-            <UserCheck className="w-3 h-3 text-amber-400" />
-            {isRtl ? 'متوسط الخبرة' : 'Intermediate'}
+          <span className="bg-blue-950/80 text-blue-300 border border-blue-700/70 px-2.5 py-0.5 rounded-full text-[11px] font-bold flex items-center gap-1">
+            <Users className="w-3.5 h-3.5 text-blue-400" />
+            <span>{isRtl ? 'عامل متوسط' : 'Intermediate'}</span>
           </span>
         );
       case 'NOVICE':
         return (
-          <span className="bg-emerald-950/80 text-emerald-300 border border-emerald-800/80 px-2 py-0.5 rounded-md text-[11px] font-bold inline-flex items-center gap-1">
-            <Users className="w-3 h-3 text-emerald-400" />
-            {isRtl ? 'مبتدئ / سريع' : 'Novice'}
+          <span className="bg-emerald-950/80 text-emerald-300 border border-emerald-700/70 px-2.5 py-0.5 rounded-full text-[11px] font-bold flex items-center gap-1">
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+            <span>{isRtl ? 'عامل مبتدئ' : 'Novice'}</span>
           </span>
         );
     }
   };
 
-  // Helper for Difficulty Badge Styles
-  const getDifficultyBadge = (level: GroupDifficultyLevel) => {
-    switch (level) {
+  const getDifficultyBadge = (diff: GroupDifficultyLevel) => {
+    switch (diff) {
       case 'HIGH_EXPERT':
         return (
-          <span className="bg-red-900/60 text-red-200 border border-red-700/80 px-2.5 py-1 rounded-lg text-xs font-black inline-flex items-center gap-1.5 shadow-sm">
-            <AlertCircle className="w-3.5 h-3.5 text-red-400" />
-            {isRtl ? 'صعبة التجهيز (تحتاج لعامل خبير)' : 'High Difficulty (Expert)'}
+          <span className="bg-red-950/80 text-red-300 border border-red-800/80 px-2.5 py-0.5 rounded-md text-[11px] font-black">
+            {isRtl ? 'صعوبة عالية (حساس/زجاجيات)' : 'High (Fragile)'}
           </span>
         );
       case 'MEDIUM_INTERMEDIATE':
         return (
-          <span className="bg-amber-900/60 text-amber-200 border border-amber-700/80 px-2.5 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 shadow-sm">
-            <Layers className="w-3.5 h-3.5 text-amber-400" />
-            {isRtl ? 'متوسطة الصعوبة' : 'Medium Difficulty'}
+          <span className="bg-amber-950/80 text-amber-300 border border-amber-800/80 px-2.5 py-0.5 rounded-md text-[11px] font-bold">
+            {isRtl ? 'صعوبة متوسطة (غذائيات/أدوية)' : 'Medium (Standard)'}
           </span>
         );
       case 'LOW_NOVICE':
         return (
-          <span className="bg-emerald-900/60 text-emerald-200 border border-emerald-700/80 px-2.5 py-1 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 shadow-sm">
-            <Boxes className="w-3.5 h-3.5 text-emerald-400" />
-            {isRtl ? 'سهلة التجهيز (كراتين / سريع)' : 'Low Difficulty (Novice)'}
+          <span className="bg-emerald-950/80 text-emerald-300 border border-emerald-800/80 px-2.5 py-0.5 rounded-md text-[11px] font-bold">
+            {isRtl ? 'صعوبة منخفضة (كراتين مقفلة)' : 'Low (Bulk/Fast)'}
           </span>
         );
     }
   };
 
-  // Filter groups
   const filteredGroups = activeWave?.groups.filter(group => {
     if (selectedGroupFilter !== 'ALL' && group.groupId !== selectedGroupFilter) return false;
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      const matchGroupName = group.groupName.toLowerCase().includes(q);
-      const matchWorker = group.assignedWorkerName?.toLowerCase().includes(q);
-      const matchItems = group.items.some(
-        it => it.itemCode.toLowerCase().includes(q) || it.itemName.toLowerCase().includes(q)
-      );
-      return matchGroupName || matchWorker || matchItems;
-    }
-    return true;
+    if (!searchQuery.trim()) return true;
+    const query = searchQuery.toLowerCase();
+    return (
+      group.groupName.toLowerCase().includes(query) ||
+      group.items.some(i => i.itemCode.toLowerCase().includes(query) || i.itemName.toLowerCase().includes(query))
+    );
   }) || [];
 
   return (
-    <div className="space-y-5">
-      {/* Top Banner & Title */}
-      <div className="bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-indigo-900/50 rounded-2xl p-4 sm:p-5 shadow-xl">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+    <div className="space-y-5" dir={isRtl ? 'rtl' : 'ltr'}>
+      {/* Top Header Card */}
+      <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-xl">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-xl bg-indigo-600/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400 shadow-inner">
-              <ListFilter className="w-6 h-6" />
+            <div className="p-3 bg-indigo-600/20 text-indigo-400 rounded-2xl border border-indigo-500/30 shadow-inner">
+              <Boxes className="w-7 h-7" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-black text-white tracking-wide">
-                  {isRtl ? 'تكوين قائمة التقاط وانتقاء الفواتير المجمعة' : 'Batch Wave Picking Generator'}
+                <h1 className="text-lg sm:text-xl font-black text-white">
+                  {isRtl ? 'قائمة وموجات الانتقاء المجمعة (Batch Picking Waves)' : 'Multi-Invoice Batch Picking Wave'}
                 </h1>
-                <span className="bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded-full text-[11px] font-bold">
-                  {isRtl ? 'إكسيل ⬅ تجميع كود ⬅ عبوات ⬅ إسناد عمال' : 'Excel Aggregation & Packaging'}
-                </span>
+                {activeWave && (
+                  <span className="text-[11px] bg-indigo-950 text-indigo-300 px-2.5 py-0.5 rounded-full border border-indigo-700 font-mono font-bold">
+                    {activeWave.waveNo}
+                  </span>
+                )}
+                {activeWave?.status === 'COMPLETED' && (
+                  <span className="text-[10px] bg-emerald-950 text-emerald-300 px-2 py-0.5 rounded-full border border-emerald-700 flex items-center gap-1 font-bold">
+                    <Lock className="w-3 h-3" />
+                    <span>مقفلة ومعتمدة</span>
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                {isRtl 
-                  ? 'رفع فواتير متعددة مفصلة، دمج وتجميع الكميات ذات الكود الواحد، تفصيلها لمجموعات وعبوات، وإسنادها للعمال حسب الخبرة'
-                  : 'Import multi-invoice orders, aggregate by item code, breakdown packaging (cartons/packs/pcs), and assign to workers by skill level.'}
+                {isRtl
+                  ? 'تجميع كود الصنف عبر الفواتير، احتساب العبوات وتثبيت الأعمدة باللمس، وإسناد المهام للعمال مع إمكانية التعديل اليدوي قبل التصدير'
+                  : 'Multi-invoice item aggregation, touch-locked packaging columns, smart worker assignment with manual override before final report generation'}
               </p>
             </div>
           </div>
 
-          {/* Action buttons on top */}
+          {/* Quick Action Buttons */}
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => exportAllPickingWavesToExcel(savedWaves)}
@@ -557,14 +896,25 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
             </button>
 
             {activeWave && (
-              <button
-                onClick={() => exportPickingWaveToExcel(activeWave)}
-                className="bg-slate-800/90 hover:bg-slate-700 text-emerald-400 border border-slate-700 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"
-                title={isRtl ? 'تصدير الموجة الحالية إلى إكسيل' : 'Export Current Wave'}
-              >
-                <FileSpreadsheet className="w-4 h-4" />
-                <span>{isRtl ? `تصدير ${activeWave.waveNo}` : 'Export Wave'}</span>
-              </button>
+              <>
+                <button
+                  onClick={handleLockWave}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"
+                  title="اعتماد وقفل موجة الانتقاء الحالية"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>{isRtl ? 'اعتماد وقفل الموجة' : 'Approve & Lock Wave'}</span>
+                </button>
+
+                <button
+                  onClick={() => exportPickingWaveToExcel(activeWave)}
+                  className="bg-slate-800/90 hover:bg-slate-700 text-emerald-400 border border-slate-700 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"
+                  title={isRtl ? 'تصدير الموجة الحالية إلى إكسيل' : 'Export Current Wave'}
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>{isRtl ? `تصدير ${activeWave.waveNo}` : 'Export Wave'}</span>
+                </button>
+              </>
             )}
 
             <button
@@ -671,7 +1021,53 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
         </div>
 
         {activeWave && activeSubTab === 'wave' && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Manual Edit Mode Toggle Button */}
+            <button
+              onClick={() => {
+                setIsManualEditMode(!isManualEditMode);
+                showNotice(
+                  !isManualEditMode 
+                    ? (isRtl ? '✍️ تم تفعيل وضع التعديل اليدوي والمراجعة قبل إصدار التقرير' : 'Manual Edit Mode Enabled') 
+                    : (isRtl ? '🔒 تم إيقاف التعديل اليدوي والانتقال لوضع الحماية والمسح المباشر' : 'Read-only Protection Mode Enabled'),
+                  !isManualEditMode ? 'SUCCESS' : 'INFO'
+                );
+              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 transition-all shadow-sm ${
+                isManualEditMode
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white ring-2 ring-emerald-400/50'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
+              }`}
+              title={isRtl ? 'تفعيل/إلغاء وضع التعديل اليدوي للكميات والعمال قبل استخراج التقرير' : 'Toggle Manual Edit Mode'}
+            >
+              <Edit3 className={`w-3.5 h-3.5 ${isManualEditMode ? 'text-emerald-200 animate-pulse' : 'text-slate-400'}`} />
+              <span>
+                {isRtl 
+                  ? (isManualEditMode ? 'التعديل اليدوي: [مفعل]' : 'التعديل اليدوي: [معطل]')
+                  : (isManualEditMode ? 'Manual Edit: ON' : 'Manual Edit: OFF')}
+              </span>
+            </button>
+
+            {/* Pre-Report Worker Review & Audit Modal Button */}
+            <button
+              onClick={() => setIsPreReportAuditModalOpen(true)}
+              className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 transition-all shadow-md active:scale-95"
+              title={isRtl ? 'فتح لوحة مراجعة الكميات المسندة للعمال وفحص البيانات قبل التقرير' : 'Audit Assigned Quantities & Workers'}
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-indigo-200" />
+              <span>{isRtl ? 'مراجعة وتدقيق العمال قبل التقرير' : 'Pre-Report Worker Audit'}</span>
+            </button>
+
+            {/* Auto Re-balance packaging button */}
+            <button
+              onClick={handleRebalanceAllPackaging}
+              className="bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-800/50 px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 transition-all"
+              title={isRtl ? 'إعادة احتساب الكراتين والباكتات والحبات آلياً بناءً على المعاملات' : 'Auto-rebalance packaging'}
+            >
+              <RefreshCw className="w-3 h-3 text-amber-400" />
+              <span className="hidden md:inline">{isRtl ? 'موازنة العبوات' : 'Rebalance'}</span>
+            </button>
+
             <button
               onClick={handleApplyAutoAssign}
               className="bg-indigo-950/80 hover:bg-indigo-900 text-indigo-300 border border-indigo-700/70 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"
@@ -679,15 +1075,6 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
             >
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
               <span className="hidden sm:inline">{isRtl ? 'إسناد ذكي للعمال' : 'Smart Auto-Assign'}</span>
-            </button>
-
-            <button
-              onClick={() => exportPickingWaveToExcel(activeWave)}
-              className="bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/70 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"
-              title={isRtl ? 'تصدير كامل قائمة الانتقاء لإكسيل مع تفصيل المجموعات' : 'Export Wave Excel'}
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="hidden sm:inline">{isRtl ? 'تصدير إكسيل' : 'Export Excel'}</span>
             </button>
           </div>
         )}
@@ -700,6 +1087,50 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
         <div className="space-y-4">
           {activeWave ? (
             <>
+              {/* Manual Edit Mode Status Banner */}
+              <div className={`p-3 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md transition-all ${
+                isManualEditMode 
+                  ? 'bg-emerald-950/50 border-emerald-700/80 text-emerald-100' 
+                  : 'bg-slate-900/90 border-slate-800 text-slate-300'
+              }`}>
+                <div className="flex items-center gap-2.5">
+                  <div className={`p-2 rounded-xl border ${
+                    isManualEditMode 
+                      ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-300' 
+                      : 'bg-slate-800 border-slate-700 text-slate-400'
+                  }`}>
+                    {isManualEditMode ? <Edit3 className="w-4 h-4 animate-bounce" /> : <Lock className="w-4 h-4" />}
+                  </div>
+                  <div>
+                    <div className="text-xs font-black flex items-center gap-2">
+                      <span>
+                        {isRtl 
+                          ? (isManualEditMode ? '✍️ وضع التعديل اليدوي والمراجعة الدقيقة مفعّل حالياً' : '🔒 وضع القراءة والمسح المباشر (الحقول محمية من التعديل العفوي)')
+                          : (isManualEditMode ? 'Manual Quantity & Worker Edit Mode is Active' : 'Protected Read-Only & Direct Scanning Mode Active')}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      {isRtl
+                        ? (isManualEditMode 
+                            ? 'يمكنك الآن تعديل الكميات الإجمالية، تفكيك العبوات (كراتين/باكتات/حبات)، وتغيير العامل المسند لكل مجموعة قبل قفل المهمة واستخراج التقارير.'
+                            : 'تم قفل حقول الإدخال اليدوي لمنع التعديلات الخاطئة أثناء المسح. انقر على زر [التعديل اليدوي] أعلاه إذا رغبت بالمراجعة والتعديل.')
+                        : (isManualEditMode
+                            ? 'You can now manually adjust quantities, adjust carton/pack counts, and reassign workers before final report extraction.'
+                            : 'Input fields are locked to prevent accidental modifications during scanning. Toggle Manual Edit to make changes.')}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                  <button
+                    onClick={() => setIsPreReportAuditModalOpen(true)}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3 py-1.5 rounded-xl shadow transition-all flex items-center gap-1.5"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    <span>{isRtl ? 'فحص ومراجعة التقرير' : 'Audit Report'}</span>
+                  </button>
+                </div>
+              </div>
               {/* Wave Summary Dashboard Cards */}
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                 <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 shadow-md">
@@ -748,55 +1179,109 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
                     <span>{isRtl ? 'إجمالي الباكتات' : 'Shrink Packs'}</span>
                   </div>
                   <div className="text-lg font-black text-purple-300 font-mono">
-                    {activeWave.totalPacks} <span className="text-xs font-normal text-slate-400">{isRtl ? 'باكت' : 'Pk'}</span>
+                    {activeWave.totalPacks} <span className="text-xs font-normal text-slate-400">{isRtl ? 'باكت' : 'Packs'}</span>
                   </div>
                 </div>
 
                 <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 shadow-md">
                   <div className="text-[11px] text-slate-400 font-bold mb-1 flex items-center gap-1">
-                    <Users className="w-3.5 h-3.5 text-cyan-400" />
-                    <span>{isRtl ? 'المجموعات المسندة' : 'Assigned Groups'}</span>
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>{isRtl ? 'حبات فردية' : 'Loose Pieces'}</span>
                   </div>
-                  <div className="text-lg font-black text-cyan-300 font-mono">
-                    {activeWave.groups.filter(g => g.assignedWorkerId).length} / {activeWave.groups.length}
+                  <div className="text-lg font-black text-emerald-300 font-mono">
+                    {activeWave.totalPieces} <span className="text-xs font-normal text-slate-400">{isRtl ? 'حبة' : 'Pcs'}</span>
                   </div>
                 </div>
               </div>
 
-              {/* Filtering and Search Controls */}
-              <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-3 flex flex-col sm:flex-row items-center justify-between gap-3">
-                <div className="flex items-center gap-2 w-full sm:w-auto">
-                  <Search className="w-4 h-4 text-slate-400" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder={isRtl ? 'بحث بكود الصنف، الاسم، المجموعة، أو اسم العامل...' : 'Search item, group, or worker...'}
-                    className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500 w-full sm:w-80"
-                  />
+              {/* Column Locking Toolbar & Filters */}
+              <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3.5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold text-slate-300 flex items-center gap-1">
+                    <Pin className="w-3.5 h-3.5 text-amber-400" />
+                    <span>تثبيت عمود التسجيل باللمس:</span>
+                  </span>
+
+                  <div className="inline-flex bg-slate-950 p-1 rounded-lg border border-slate-800 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTargetColumn('cartons');
+                        if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                      }}
+                      className={`px-2.5 py-1 text-xs font-bold rounded transition-all flex items-center gap-1 ${
+                        activeTargetColumn === 'cartons'
+                          ? 'bg-amber-500 text-black shadow font-black'
+                          : 'text-amber-300/70 hover:text-amber-300 hover:bg-slate-800'
+                      }`}
+                    >
+                      {activeTargetColumn === 'cartons' && <Pin className="w-3 h-3" />}
+                      <span>الكراتين</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTargetColumn('packs');
+                        if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                      }}
+                      className={`px-2.5 py-1 text-xs font-bold rounded transition-all flex items-center gap-1 ${
+                        activeTargetColumn === 'packs'
+                          ? 'bg-purple-600 text-white shadow font-black'
+                          : 'text-purple-300/70 hover:text-purple-300 hover:bg-slate-800'
+                      }`}
+                    >
+                      {activeTargetColumn === 'packs' && <Pin className="w-3 h-3" />}
+                      <span>الباكتات</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTargetColumn('pieces');
+                        if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                      }}
+                      className={`px-2.5 py-1 text-xs font-bold rounded transition-all flex items-center gap-1 ${
+                        activeTargetColumn === 'pieces'
+                          ? 'bg-blue-600 text-white shadow font-black'
+                          : 'text-blue-300/70 hover:text-blue-300 hover:bg-slate-800'
+                      }`}
+                    >
+                      {activeTargetColumn === 'pieces' && <Pin className="w-3 h-3" />}
+                      <span>حبات فردية</span>
+                    </button>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-                  <label className="text-xs text-slate-400">{isRtl ? 'تصفية بالمجموعة:' : 'Filter Group:'}</label>
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1 sm:w-60">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5 rtl:left-auto rtl:right-2.5" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder={isRtl ? 'بحث في أصناف الموجة...' : 'Search items...'}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-2.5 rtl:pl-2.5 rtl:pr-8 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
                   <select
                     value={selectedGroupFilter}
                     onChange={(e) => setSelectedGroupFilter(e.target.value)}
-                    className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 font-bold"
+                    className="bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none cursor-pointer"
                   >
-                    <option value="ALL">{isRtl ? 'جميع المجموعات' : 'All Product Groups'}</option>
+                    <option value="ALL">{isRtl ? 'كافة المجموعات' : 'All Groups'}</option>
                     {activeWave.groups.map(g => (
-                      <option key={g.groupId} value={g.groupId}>
-                        {g.groupName} ({g.items.length} صنف - {g.totalQty} حبة)
-                      </option>
+                      <option key={g.groupId} value={g.groupId}>{g.groupName}</option>
                     ))}
                   </select>
                 </div>
               </div>
 
-              {/* SEPARATED PRODUCT GROUP TABLES (فصل كل مجموعة في جدول منفصل) */}
-              <div className="space-y-6">
+              {/* Product Groups & Items List */}
+              <div className="space-y-4">
                 {filteredGroups.length === 0 ? (
-                  <div className="text-center py-12 bg-slate-900/40 border border-slate-800 rounded-2xl">
+                  <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-8 text-center">
                     <Boxes className="w-12 h-12 text-slate-600 mx-auto mb-2" />
                     <p className="text-sm text-slate-400">{isRtl ? 'لا توجد مجموعات تطابق البحث المحدد' : 'No matching product groups found'}</p>
                   </div>
@@ -805,7 +1290,7 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
                     const assignedWorker = workers.find(w => w.id === group.assignedWorkerId);
                     const isGroupCompleted = group.items.every(i => i.status === 'COMPLETED');
                     const pickedItemsCount = group.items.filter(i => i.status === 'COMPLETED').length;
-                    const completionPercent = Math.round((pickedItemsCount / group.items.length) * 100);
+                    const completionPercent = group.items.length > 0 ? Math.round((pickedItemsCount / group.items.length) * 100) : 0;
 
                     return (
                       <div
@@ -862,6 +1347,16 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
                               {assignedWorker && getExperienceBadge(assignedWorker.experienceLevel)}
                             </div>
 
+                            {/* Add Item to Group Button */}
+                            <button
+                              onClick={() => setAddingToGroupId(group.groupId)}
+                              className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 shadow-sm transition-all"
+                              title="إضافة صنف يدوياً إلى هذه المجموعة"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>{isRtl ? 'إضافة صنف' : 'Add Item'}</span>
+                            </button>
+
                             {/* Difficulty Selector */}
                             <div className="flex items-center gap-1 bg-slate-950/80 border border-slate-800 rounded-xl px-2.5 py-1.5">
                               <span className="text-[10px] text-slate-400 font-bold">{isRtl ? 'الصعوبة:' : 'Difficulty:'}</span>
@@ -911,7 +1406,7 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
                           </div>
                         </div>
 
-                        {/* Group Items Table */}
+                        {/* Group Items Table with Touch Header Locking and Manual Quantity Edit */}
                         <div className="overflow-x-auto">
                           <table className="w-full text-right text-xs">
                             <thead className="bg-slate-950/90 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
@@ -919,13 +1414,69 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
                                 <th className="p-3 text-center w-12">#</th>
                                 <th className="p-3">{isRtl ? 'كود الصنف / الباركود' : 'Item Barcode'}</th>
                                 <th className="p-3">{isRtl ? 'اسم وبيان الصنف' : 'Item Description'}</th>
-                                <th className="p-3 text-center">{isRtl ? 'الموقع' : 'Location'}</th>
                                 <th className="p-3 text-center">{isRtl ? 'إجمالي المطلوب' : 'Total Qty'}</th>
-                                <th className="p-3 text-center">{isRtl ? 'تفصيل الكراتين' : 'Cartons'}</th>
-                                <th className="p-3 text-center">{isRtl ? 'تفصيل الباكتات' : 'Packs'}</th>
-                                <th className="p-3 text-center">{isRtl ? 'حبات متبقية' : 'Loose'}</th>
-                                <th className="p-3 text-center">{isRtl ? 'الفواتير المخدومة' : 'Invoices'}</th>
-                                <th className="p-3 text-center">{isRtl ? 'حالة الالتقاط' : 'Status / Pick'}</th>
+
+                                {/* TOUCH LOCKABLE HEADER: Cartons */}
+                                <th
+                                  onClick={() => {
+                                    setActiveTargetColumn('cartons');
+                                    if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                                  }}
+                                  className={`p-3 text-center cursor-pointer transition-all ${
+                                    activeTargetColumn === 'cartons'
+                                      ? 'bg-amber-500/30 text-amber-300 border-b-2 border-amber-400 font-black'
+                                      : 'text-amber-300/80 hover:bg-slate-800'
+                                  }`}
+                                  title="المس لتثبيت تسجيل المسح في عمود الكراتين"
+                                >
+                                  <div className="flex items-center justify-center gap-1">
+                                    {activeTargetColumn === 'cartons' && <Pin className="w-3 h-3 text-amber-400 animate-bounce" />}
+                                    <span>{isRtl ? 'الكراتين' : 'Cartons'}</span>
+                                  </div>
+                                </th>
+
+                                {/* TOUCH LOCKABLE HEADER: Packs */}
+                                <th
+                                  onClick={() => {
+                                    setActiveTargetColumn('packs');
+                                    if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                                  }}
+                                  className={`p-3 text-center cursor-pointer transition-all ${
+                                    activeTargetColumn === 'packs'
+                                      ? 'bg-purple-500/30 text-purple-200 border-b-2 border-purple-400 font-black'
+                                      : 'text-purple-300/80 hover:bg-slate-800'
+                                  }`}
+                                  title="المس لتثبيت تسجيل المسح في عمود الباكتات"
+                                >
+                                  <div className="flex items-center justify-center gap-1">
+                                    {activeTargetColumn === 'packs' && <Pin className="w-3 h-3 text-purple-400 animate-bounce" />}
+                                    <span>{isRtl ? 'الباكتات' : 'Packs'}</span>
+                                  </div>
+                                </th>
+
+                                {/* TOUCH LOCKABLE HEADER: Loose */}
+                                <th
+                                  onClick={() => {
+                                    setActiveTargetColumn('pieces');
+                                    if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+                                  }}
+                                  className={`p-3 text-center cursor-pointer transition-all ${
+                                    activeTargetColumn === 'pieces'
+                                      ? 'bg-blue-500/30 text-blue-200 border-b-2 border-blue-400 font-black'
+                                      : 'text-blue-300/80 hover:bg-slate-800'
+                                  }`}
+                                  title="المس لتثبيت تسجيل المسح في عمود الحبات"
+                                >
+                                  <div className="flex items-center justify-center gap-1">
+                                    {activeTargetColumn === 'pieces' && <Pin className="w-3 h-3 text-blue-400 animate-bounce" />}
+                                    <span>{isRtl ? 'حبات متبقية' : 'Loose'}</span>
+                                  </div>
+                                </th>
+
+                                <th className="p-3 text-center">{isRtl ? 'المحقق / الملتقط' : 'Picked Qty'}</th>
+                                <th className="p-3 text-center">{isRtl ? 'الفواتير' : 'Invoices'}</th>
+                                <th className="p-3 text-center">{isRtl ? 'الحالة' : 'Status'}</th>
+                                <th className="p-3 text-center w-10">{isRtl ? 'حذف' : 'Del'}</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-800/60">
@@ -948,27 +1499,214 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
                                     </td>
                                     <td className="p-3">
                                       <div className="font-semibold text-slate-100">{item.itemName}</div>
-                                      <div className="text-[10px] text-slate-400">{item.unit}</div>
+                                      <div className="text-[10px] text-slate-400">
+                                        {item.unit} | معامل كرتونة: ×{item.cartonFactor} | باكت: ×{item.packFactor}
+                                      </div>
                                     </td>
-                                    <td className="p-3 text-center font-mono text-slate-300 text-[11px]">
-                                      {item.location || 'Aisle-01'}
-                                    </td>
-                                    <td className="p-3 text-center font-black text-indigo-300 font-mono text-sm">
-                                      {item.totalRequiredQty}
-                                    </td>
+
+                                    {/* Editable Total Required Qty */}
                                     <td className="p-3 text-center">
-                                      <span className="bg-amber-950/50 text-amber-300 border border-amber-800/40 px-2 py-0.5 rounded font-mono font-bold text-[11px]">
-                                        {item.cartonsCount} <span className="text-[9px] text-slate-400">(x{item.cartonFactor})</span>
-                                      </span>
+                                      {isManualEditMode ? (
+                                        <div className="inline-flex flex-col items-center gap-1">
+                                          <div className="flex items-center gap-1">
+                                            <button
+                                              type="button"
+                                              onClick={() => handleQuickAdjustItemQty(group.groupId, item.id, -1)}
+                                              className="p-1 bg-slate-950 hover:bg-slate-800 rounded text-slate-400 hover:text-white border border-slate-800"
+                                              title="إنقاص 1"
+                                            >
+                                              <Minus className="w-3 h-3" />
+                                            </button>
+                                            <input
+                                              type="number"
+                                              min="1"
+                                              value={item.totalRequiredQty}
+                                              onChange={(e) => {
+                                                const val = Math.max(1, Number(e.target.value) || 1);
+                                                const cFactor = item.cartonFactor || 24;
+                                                const pFactor = item.packFactor || 6;
+                                                handleUpdateWaveItem(group.groupId, item.id, {
+                                                  totalRequiredQty: val,
+                                                  cartonsCount: Math.floor(val / cFactor),
+                                                  packsCount: Math.floor((val % cFactor) / pFactor),
+                                                  piecesCount: (val % cFactor) % pFactor
+                                                });
+                                              }}
+                                              className="w-16 bg-slate-950 border border-indigo-700/80 rounded px-1.5 py-1 text-center font-mono font-black text-indigo-300 focus:outline-none focus:border-indigo-400 shadow-inner"
+                                            />
+                                            <button
+                                              type="button"
+                                              onClick={() => handleQuickAdjustItemQty(group.groupId, item.id, 1)}
+                                              className="p-1 bg-slate-950 hover:bg-slate-800 rounded text-indigo-400 hover:text-indigo-300 border border-slate-800"
+                                              title="زيادة 1"
+                                            >
+                                              <Plus className="w-3 h-3" />
+                                            </button>
+                                          </div>
+
+                                          {/* Quick Adjust Buttons */}
+                                          <div className="flex items-center gap-1 text-[9px] font-mono text-slate-400">
+                                            <button
+                                              type="button"
+                                              onClick={() => handleQuickAdjustItemQty(group.groupId, item.id, -10)}
+                                              className="px-1 py-0.5 hover:bg-slate-800 rounded text-slate-400 hover:text-red-400"
+                                              title="إنقاص 10"
+                                            >
+                                              -10
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => handleQuickAdjustItemQty(group.groupId, item.id, 10)}
+                                              className="px-1 py-0.5 hover:bg-slate-800 rounded text-slate-400 hover:text-emerald-400"
+                                              title="زيادة 10"
+                                            >
+                                              +10
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => handleRebalanceSingleItem(group.groupId, item.id)}
+                                              className="px-1 py-0.5 bg-amber-950/60 hover:bg-amber-900/80 text-amber-300 rounded border border-amber-800/40"
+                                              title="إعادة موازنة تفكيك العبوات آلياً"
+                                            >
+                                              ⚡
+                                            </button>
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <div className="font-mono font-black text-indigo-300 text-xs bg-slate-950 px-2.5 py-1 rounded-lg border border-slate-800 inline-block shadow-sm">
+                                          {item.totalRequiredQty} <span className="text-[10px] text-slate-400 font-normal">{item.unit}</span>
+                                        </div>
+                                      )}
                                     </td>
+
+                                    {/* Editable Cartons Count */}
                                     <td className="p-3 text-center">
-                                      <span className="bg-purple-950/50 text-purple-300 border border-purple-800/40 px-2 py-0.5 rounded font-mono font-bold text-[11px]">
-                                        {item.packsCount} <span className="text-[9px] text-slate-400">(x{item.packFactor})</span>
-                                      </span>
+                                      {isManualEditMode ? (
+                                        <div className="inline-flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                                          <button
+                                            type="button"
+                                            onClick={() => handleUpdateWaveItem(group.groupId, item.id, { cartonsCount: Math.max(0, (item.cartonsCount || 0) - 1) })}
+                                            className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white"
+                                          >
+                                            <Minus className="w-3 h-3" />
+                                          </button>
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            value={item.cartonsCount || 0}
+                                            onChange={(e) => handleUpdateWaveItem(group.groupId, item.id, { cartonsCount: Number(e.target.value) || 0 })}
+                                            className="w-10 bg-transparent text-center font-mono font-bold text-amber-300 focus:outline-none"
+                                          />
+                                          <button
+                                            type="button"
+                                            onClick={() => handleUpdateWaveItem(group.groupId, item.id, { cartonsCount: (item.cartonsCount || 0) + 1 })}
+                                            className="p-1 hover:bg-slate-800 rounded text-amber-400 hover:text-amber-300"
+                                          >
+                                            <Plus className="w-3 h-3" />
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <div className="font-mono font-bold text-amber-300 text-xs bg-amber-950/30 border border-amber-800/40 px-2 py-0.5 rounded inline-block">
+                                          📦 {item.cartonsCount || 0}
+                                        </div>
+                                      )}
                                     </td>
-                                    <td className="p-3 text-center font-mono text-slate-300">
-                                      {item.piecesCount}
+
+                                    {/* Editable Packs Count */}
+                                    <td className="p-3 text-center">
+                                      {isManualEditMode ? (
+                                        <div className="inline-flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                                          <button
+                                            type="button"
+                                            onClick={() => handleUpdateWaveItem(group.groupId, item.id, { packsCount: Math.max(0, (item.packsCount || 0) - 1) })}
+                                            className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white"
+                                          >
+                                            <Minus className="w-3 h-3" />
+                                          </button>
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            value={item.packsCount || 0}
+                                            onChange={(e) => handleUpdateWaveItem(group.groupId, item.id, { packsCount: Number(e.target.value) || 0 })}
+                                            className="w-10 bg-transparent text-center font-mono font-bold text-purple-300 focus:outline-none"
+                                          />
+                                          <button
+                                            type="button"
+                                            onClick={() => handleUpdateWaveItem(group.groupId, item.id, { packsCount: (item.packsCount || 0) + 1 })}
+                                            className="p-1 hover:bg-slate-800 rounded text-purple-400 hover:text-purple-300"
+                                          >
+                                            <Plus className="w-3 h-3" />
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <div className="font-mono font-bold text-purple-300 text-xs bg-purple-950/30 border border-purple-800/40 px-2 py-0.5 rounded inline-block">
+                                          🧃 {item.packsCount || 0}
+                                        </div>
+                                      )}
                                     </td>
+
+                                    {/* Editable Pieces Count */}
+                                    <td className="p-3 text-center">
+                                      {isManualEditMode ? (
+                                        <div className="inline-flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                                          <button
+                                            type="button"
+                                            onClick={() => handleUpdateWaveItem(group.groupId, item.id, { piecesCount: Math.max(0, (item.piecesCount || 0) - 1) })}
+                                            className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white"
+                                          >
+                                            <Minus className="w-3 h-3" />
+                                          </button>
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            value={item.piecesCount || 0}
+                                            onChange={(e) => handleUpdateWaveItem(group.groupId, item.id, { piecesCount: Number(e.target.value) || 0 })}
+                                            className="w-10 bg-transparent text-center font-mono font-bold text-blue-300 focus:outline-none"
+                                          />
+                                          <button
+                                            type="button"
+                                            onClick={() => handleUpdateWaveItem(group.groupId, item.id, { piecesCount: (item.piecesCount || 0) + 1 })}
+                                            className="p-1 hover:bg-slate-800 rounded text-blue-400 hover:text-blue-300"
+                                          >
+                                            <Plus className="w-3 h-3" />
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <div className="font-mono font-bold text-blue-300 text-xs bg-blue-950/30 border border-blue-800/40 px-2 py-0.5 rounded inline-block">
+                                          🔹 {item.piecesCount || 0}
+                                        </div>
+                                      )}
+                                    </td>
+
+                                    {/* Picked Qty with Stepper */}
+                                    <td className="p-3 text-center">
+                                      <div className="inline-flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleUpdateWaveItem(group.groupId, item.id, { pickedQty: Math.max(0, (item.pickedQty || 0) - 1) })}
+                                          className="p-1 hover:bg-slate-800 rounded text-slate-400"
+                                        >
+                                          <Minus className="w-3 h-3" />
+                                        </button>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          max={item.totalRequiredQty}
+                                          value={item.pickedQty}
+                                          onChange={(e) => handleUpdateWaveItem(group.groupId, item.id, { pickedQty: Math.min(item.totalRequiredQty, Number(e.target.value) || 0) })}
+                                          className="w-10 bg-transparent text-center font-mono font-bold text-emerald-400 focus:outline-none"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleUpdateWaveItem(group.groupId, item.id, { pickedQty: Math.min(item.totalRequiredQty, (item.pickedQty || 0) + 1) })}
+                                          className="p-1 hover:bg-slate-800 rounded text-emerald-400"
+                                        >
+                                          <Plus className="w-3 h-3" />
+                                        </button>
+                                      </div>
+                                    </td>
+
+                                    {/* Invoices Breakdown Button */}
                                     <td className="p-3 text-center">
                                       <button
                                         onClick={() => setSelectedItemForDetails(item)}
@@ -978,6 +1716,8 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
                                         <span>{item.invoiceSources.length} {isRtl ? 'فواتير' : 'Invs'}</span>
                                       </button>
                                     </td>
+
+                                    {/* Pick Action / Toggle */}
                                     <td className="p-3 text-center">
                                       <button
                                         onClick={() => handleToggleItemPicked(group.groupId, item.id)}
@@ -988,8 +1728,25 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
                                         }`}
                                       >
                                         <CheckCircle2 className={`w-3.5 h-3.5 ${isItemDone ? 'text-white' : 'text-slate-500'}`} />
-                                        <span>{isItemDone ? (isRtl ? 'تم الالتقاط' : 'Picked') : (isRtl ? 'تأكيد الالتقاط' : 'Mark Picked')}</span>
+                                        <span>{isItemDone ? (isRtl ? 'تم' : 'Done') : (isRtl ? 'التقاط' : 'Pick')}</span>
                                       </button>
+                                    </td>
+
+                                    {/* Delete Item */}
+                                    <td className="p-3 text-center">
+                                      {isManualEditMode ? (
+                                        <button
+                                          onClick={() => handleRemoveItemFromGroup(group.groupId, item.id)}
+                                          className="p-1 text-slate-500 hover:text-red-400 hover:bg-red-950/40 rounded transition-colors"
+                                          title="حذف الصنف من قائمة التجهيز"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      ) : (
+                                        <span className="text-slate-600 p-1 cursor-not-allowed" title="التعديل اليدوي معطل">
+                                          <Lock className="w-3 h-3" />
+                                        </span>
+                                      )}
                                     </td>
                                   </tr>
                                 );
@@ -1216,7 +1973,7 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
       )}
 
       {/* ========================================================================= */}
-      {/* TAB 3: SAVED PICKING WAVES HISTORY                                       */}
+      {/* TAB 3: SAVED PICKING WAVES HISTORY (WITH RE-OPEN & READ-ONLY MODAL)       */}
       {/* ========================================================================= */}
       {activeSubTab === 'history' && (
         <div className="space-y-4">
@@ -1225,7 +1982,7 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
               <div className="flex items-center gap-2">
                 <Clock className="w-5 h-5 text-indigo-400" />
                 <div>
-                  <h3 className="text-sm font-black text-white">{isRtl ? 'سجل قوائم وموجات الانتقاء السابقة' : 'Saved Waves History'}</h3>
+                  <h3 className="text-sm font-black text-white">{isRtl ? 'سجل قوائم وموجات الانتقاء المعتمدة والمحفوظة' : 'Saved Waves History'}</h3>
                   <p className="text-xs text-slate-400">{savedWaves.length} {isRtl ? 'موجة مسجلة في النظام' : 'Waves recorded'}</p>
                 </div>
               </div>
@@ -1254,10 +2011,13 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
                           {wave.waveNo}
                         </span>
                         <h4 className="text-sm font-bold text-white">{wave.title}</h4>
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                          wave.status === 'COMPLETED' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-indigo-950 text-indigo-300 border border-indigo-800'
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1 ${
+                          wave.status === 'COMPLETED' 
+                            ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' 
+                            : 'bg-indigo-950 text-indigo-300 border border-indigo-800'
                         }`}>
-                          {wave.status}
+                          {wave.status === 'COMPLETED' ? <Lock className="w-3 h-3 text-emerald-400" /> : <Clock className="w-3 h-3 text-indigo-400" />}
+                          <span>{wave.status === 'COMPLETED' ? (isRtl ? 'مكتمل ومقفل' : 'Completed') : wave.status}</span>
                         </span>
                       </div>
                       <div className="text-xs text-slate-400 flex flex-wrap items-center gap-3">
@@ -1274,15 +2034,24 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
+                      {/* Read-only Document Preview Button */}
                       <button
-                        onClick={() => {
-                          setActiveWave(wave);
-                          setActiveSubTab('wave');
-                          showNotice(isRtl ? `تم فتح موجة التجهيز ${wave.waveNo}` : `Opened wave ${wave.waveNo}`, 'SUCCESS');
-                        }}
-                        className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition-all"
+                        onClick={() => setViewingWave(wave)}
+                        className="bg-slate-800 hover:bg-slate-700 text-indigo-300 px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1 border border-indigo-900/40"
+                        title={isRtl ? 'عرض تفاصيل الموجة للقراءة فقط' : 'View Wave Document'}
                       >
-                        {isRtl ? 'فتح في شاشة التجهيز' : 'Open in Wave View'}
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>{isRtl ? 'عرض المستند' : 'View'}</span>
+                      </button>
+
+                      {/* Reopen Wave Button with Secure Prompt */}
+                      <button
+                        onClick={() => handleRequestReopenWave(wave)}
+                        className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1 border border-amber-500/40"
+                        title={isRtl ? 'طلب إعادة فتح موجة الانتقاء للتعديل' : 'Reopen Wave'}
+                      >
+                        <Unlock className="w-3.5 h-3.5" />
+                        <span>{isRtl ? 'إعادة فتح' : 'Reopen'}</span>
                       </button>
 
                       <button
@@ -1317,8 +2086,226 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
       )}
 
       {/* ========================================================================= */}
-      {/* MODAL: INVOICE SOURCES BREAKDOWN (تفاصيل الفواتير التابعة للصنف المجمع)     */}
+      {/* MODAL: ADD CUSTOM ITEM TO GROUP                                           */}
       {/* ========================================================================= */}
+      {addingToGroupId && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl animate-in fade-in zoom-in duration-150">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-sm font-black text-white flex items-center gap-2">
+                <Plus className="w-4 h-4 text-indigo-400" />
+                <span>{isRtl ? 'إضافة صنف يدوياً لقائمة الانتقاء' : 'Add Item to Wave'}</span>
+              </h3>
+              <button onClick={() => setAddingToGroupId(null)} className="text-slate-400 hover:text-white">✕</button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-[11px] text-slate-400 font-bold block mb-1">كود الصنف / الباركود *</label>
+                <input
+                  type="text"
+                  value={newItemCode}
+                  onChange={(e) => setNewItemCode(e.target.value)}
+                  placeholder="ITEM-101"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] text-slate-400 font-bold block mb-1">اسم الصنف / البيان</label>
+                <input
+                  type="text"
+                  value={newItemName}
+                  onChange={(e) => setNewItemName(e.target.value)}
+                  placeholder="اسم المنتج أو الصنف..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white font-bold"
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="text-[10px] text-slate-400 font-bold block mb-1">إجمالي الكمية</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={newItemQty}
+                    onChange={(e) => setNewItemQty(Number(e.target.value) || 1)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-white font-mono text-center"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] text-slate-400 font-bold block mb-1">معامل الكرتونة</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={newItemCartonFactor}
+                    onChange={(e) => setNewItemCartonFactor(Number(e.target.value) || 24)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-amber-300 font-mono text-center"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[10px] text-slate-400 font-bold block mb-1">معامل الباكت</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={newItemPackFactor}
+                    onChange={(e) => setNewItemPackFactor(Number(e.target.value) || 6)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-purple-300 font-mono text-center"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setAddingToGroupId(null)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-400 hover:text-white bg-slate-800"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={handleAddItemToGroup}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md"
+              >
+                إضافة للقائمة
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: READ-ONLY PREVIEW OF SAVED PICKING WAVE                            */}
+      {/* ========================================================================= */}
+      {viewingWave && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-4xl w-full p-5 sm:p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in duration-150 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <FileCheck className="w-5 h-5 text-indigo-400" />
+                <h3 className="text-sm font-black text-white">
+                  عرض مستند موجة الانتقاء المكتملة (للقراءة فقط)
+                </h3>
+              </div>
+              <button onClick={() => setViewingWave(null)} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-950/80 p-3.5 rounded-xl border border-slate-800">
+              <div>
+                <div className="text-[10px] text-slate-400">رقم الموجة</div>
+                <div className="text-xs font-mono font-bold text-amber-300">{viewingWave.waveNo}</div>
+              </div>
+              <div>
+                <div className="text-[10px] text-slate-400">عنوان الموجة</div>
+                <div className="text-xs font-bold text-white">{viewingWave.title}</div>
+              </div>
+              <div>
+                <div className="text-[10px] text-slate-400">الفواتير والأصناف</div>
+                <div className="text-xs font-mono font-bold text-blue-300">
+                  {viewingWave.totalInvoicesCount} فواتير | {viewingWave.totalItemsCount} أصناف
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] text-slate-400">إجمالي الحبات والكراتين</div>
+                <div className="text-xs font-mono font-bold text-emerald-400">
+                  {viewingWave.totalQuantity} حبة ({viewingWave.totalCartons} كرتونة)
+                </div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+              {viewingWave.groups.map((group, idx) => (
+                <div key={idx} className="bg-slate-950/60 p-3 rounded-xl border border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold">
+                    <span className="text-white">{group.groupName}</span>
+                    <span className="text-slate-400 font-mono">{group.items.length} أصناف | {group.totalQty} حبة</span>
+                  </div>
+                  <table className="w-full text-xs text-slate-300 text-right">
+                    <thead className="bg-slate-900 text-slate-400 text-[10px]">
+                      <tr>
+                        <th className="p-1.5">الصنف</th>
+                        <th className="p-1.5 text-center">المطلوب</th>
+                        <th className="p-1.5 text-center">الكراتين</th>
+                        <th className="p-1.5 text-center">الباكتات</th>
+                        <th className="p-1.5 text-center">الحبات</th>
+                        <th className="p-1.5 text-center">الملتقط</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/40">
+                      {group.items.map((it, itIdx) => (
+                        <tr key={itIdx}>
+                          <td className="p-1.5">
+                            <span className="font-mono text-amber-300">{it.itemCode}</span> - {it.itemName}
+                          </td>
+                          <td className="p-1.5 text-center font-mono font-bold text-indigo-300">{it.totalRequiredQty}</td>
+                          <td className="p-1.5 text-center font-mono text-amber-300">{it.cartonsCount || 0}</td>
+                          <td className="p-1.5 text-center font-mono text-purple-300">{it.packsCount || 0}</td>
+                          <td className="p-1.5 text-center font-mono text-blue-300">{it.piecesCount || 0}</td>
+                          <td className="p-1.5 text-center font-mono text-emerald-400">{it.pickedQty || 0}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-slate-800">
+              <button
+                onClick={() => {
+                  const toReopen = viewingWave;
+                  setViewingWave(null);
+                  handleRequestReopenWave(toReopen);
+                }}
+                className="px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 border border-amber-500/40"
+              >
+                <Unlock className="w-3.5 h-3.5" />
+                <span>طلب إعادة فتح للتعديل</span>
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => exportPickingWaveToExcel(viewingWave)}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>تصدير إكسيل</span>
+                </button>
+
+                <button
+                  onClick={() => setViewingWave(null)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold"
+                >
+                  إغلاق
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* RE-OPEN CONFIRMATION SECURITY MODAL (نعم / لا / إلغاء)                      */}
+      {/* ========================================================================= */}
+      {reopenPrompt && (
+        <ReopenConfirmationModal
+          isOpen={reopenPrompt.isOpen}
+          onClose={() => setReopenPrompt(null)}
+          onDeny={() => setReopenPrompt(null)}
+          onConfirm={reopenPrompt.onConfirm}
+          documentTitle={reopenPrompt.title}
+          documentTypeLabel="قائمة وموجة انتقال مقفلة"
+          isRtl={isRtl}
+        />
+      )}
+
+      {/* Modal: Invoices Breakdown for Aggregated Item */}
       {selectedItemForDetails && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-5 space-y-4 shadow-2xl animate-in fade-in zoom-in duration-150">
@@ -1390,6 +2377,23 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
         onRulesUpdated={(updated) => setPackagingRules(updated)}
         isRtl={isRtl}
       />
+
+      {/* Pre-Report Worker Audit & Manual Adjustment Modal */}
+      {activeWave && (
+        <PreReportAuditModal
+          isOpen={isPreReportAuditModalOpen}
+          onClose={() => setIsPreReportAuditModalOpen(false)}
+          wave={activeWave}
+          workers={workers}
+          onAssignWorker={handleAssignWorkerToGroup}
+          onDifficultyChange={handleDifficultyChange}
+          onUpdateItemQty={handleUpdateWaveItem}
+          onExportExcel={() => exportPickingWaveToExcel(activeWave)}
+          onExportWorkerSlip={(group, worker) => exportWorkerPickingSheetPdf(activeWave, group, worker)}
+          onApproveAndLock={handleLockWave}
+          isRtl={isRtl}
+        />
+      )}
     </div>
   );
 };

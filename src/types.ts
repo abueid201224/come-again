@@ -242,6 +242,11 @@ export interface ReceivingSessionItem {
   expectedQty: number;
   receivedQty: number;
   damagedQty: number;
+  cartonFactor?: number;
+  packFactor?: number;
+  cartonsCount?: number;
+  packsCount?: number;
+  piecesCount?: number;
   unitCost?: number;
   batchNumber?: string;
   expiryDate?: string;
@@ -385,5 +390,16 @@ export interface BatchPickingWave {
   notes?: string;
 }
 
-export type WarehouseModuleTab = 'audit' | 'receiving' | 'returns' | 'inventory' | 'picking' | 'packaging_groups' | 'errors' | 'master' | 'settings';
+export type WarehouseModuleTab = 'dashboard' | 'receiving' | 'audit' | 'returns' | 'inventory' | 'picking' | 'packaging_groups' | 'errors' | 'master' | 'settings';
+
+export type ActiveTargetColumn = 'cartons' | 'packs' | 'pieces' | 'direct_qty';
+
+export interface DocumentReopenPrompt {
+  isOpen: boolean;
+  documentType: 'RETURN' | 'REFUND' | 'INVENTORY' | 'RECEIVING' | 'PICKING';
+  documentId: string;
+  documentNo: string;
+  title: string;
+  onConfirm: () => void;
+}
 

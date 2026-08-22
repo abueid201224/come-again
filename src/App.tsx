@@ -42,6 +42,9 @@ import { ReceivingScreen } from './components/ReceivingScreen';
 import { ReturnsScreen } from './components/ReturnsScreen';
 import { InventoryCountScreen } from './components/InventoryCountScreen';
 import { PickingWaveScreen } from './components/PickingWaveScreen';
+import { VerticalServicesDrawer } from './components/VerticalServicesDrawer';
+import { AndroidApkGuideModal } from './components/AndroidApkGuideModal';
+import { MobileBottomNav } from './components/MobileBottomNav';
 
 // Helper for finding matching key ignoring case, whitespace, and leading zeros
 function findMatchingItemKey(items: Record<string, ScannedAuditItem>, code: string): string | null {
@@ -76,6 +79,8 @@ export function App() {
   
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [isAuditorModalOpen, setIsAuditorModalOpen] = useState(false);
+  const [isServicesDrawerOpen, setIsServicesDrawerOpen] = useState(false);
+  const [isApkGuideModalOpen, setIsApkGuideModalOpen] = useState(false);
   const [summaryModalState, setSummaryModalState] = useState<{
     isOpen: boolean;
     invoiceNo: string;
@@ -434,10 +439,12 @@ export function App() {
         canInstallPwa={Boolean(deferredInstallPrompt)}
         onInstallPwa={handleInstallPwa}
         onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
+        onToggleDrawer={() => setIsServicesDrawerOpen(prev => !prev)}
+        onOpenApkGuide={() => setIsApkGuideModalOpen(true)}
       />
 
       {/* Main Screen Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 pb-20 md:pb-6">
         {/* 1. Inbound Receiving Screen */}
         {currentTab === 'receiving' && (
           <ReceivingScreen
@@ -522,6 +529,46 @@ export function App() {
           />
         )}
       </main>
+
+      {/* Mobile & Tablet Bottom Quick Navigation Bar */}
+      <MobileBottomNav
+        currentTab={currentTab}
+        onSelectTab={(tab) => setCurrentTab(tab)}
+        onToggleDrawer={() => setIsServicesDrawerOpen(prev => !prev)}
+        onOpenSyncModal={() => setIsSyncModalOpen(true)}
+        errorCount={discrepancies.length + wrongPickings.length}
+        isRtl={isRtl}
+        onOpenApkGuide={() => setIsApkGuideModalOpen(true)}
+      />
+
+      {/* Vertical Services Drawer (Active Working Service Always on Top!) */}
+      <VerticalServicesDrawer
+        isOpen={isServicesDrawerOpen}
+        onClose={() => setIsServicesDrawerOpen(false)}
+        currentTab={currentTab}
+        onSelectTab={(tab) => {
+          if (tab !== 'apk-guide') {
+            setCurrentTab(tab);
+          }
+        }}
+        settings={settings}
+        syncMeta={syncMeta}
+        errorCount={discrepancies.length + wrongPickings.length}
+        wrongPickingCount={wrongPickings.length}
+        pendingLabCount={pendingLabCount}
+        overdueLabCount={overdueLabCount}
+        activeSession={activeSession}
+        onOpenApkGuide={() => setIsApkGuideModalOpen(true)}
+        onOpenSyncModal={() => setIsSyncModalOpen(true)}
+        onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
+      />
+
+      {/* Android Studio APK Build Guide & PDF Export Modal */}
+      <AndroidApkGuideModal
+        isOpen={isApkGuideModalOpen}
+        onClose={() => setIsApkGuideModalOpen(false)}
+        settings={settings}
+      />
 
       {/* Daily Excel Sync Modal */}
       <ExcelSyncModal
