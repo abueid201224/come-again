@@ -198,6 +198,19 @@ export async function saveMasterInvoiceItems(
   return syncMeta;
 }
 
+export async function saveMasterItems(items: MasterInvoiceItem[]): Promise<void> {
+  const db = await getDB();
+  const tx = db.transaction('master_items', 'readwrite');
+  const store = tx.objectStore('master_items');
+  for (const item of items) {
+    await store.add({
+      ...item,
+      importedAt: item.importedAt || new Date().toISOString(),
+    });
+  }
+  await tx.done;
+}
+
 export async function getSyncMetadata(): Promise<SyncMetadata> {
   const db = await getDB();
   const meta = await db.get('key_value', 'sync_metadata');

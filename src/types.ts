@@ -102,6 +102,8 @@ export interface WrongPickingItem {
   notes?: string;
 }
 
+export type WrongPickingRecord = WrongPickingItem;
+
 export interface InvoiceAuditHistory {
   id?: number;
   orderNo?: string;

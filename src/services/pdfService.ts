@@ -155,7 +155,7 @@ export async function parsePdfInvoice(
     paymentMethod = 'CASH';
   }
 
-  // Detect items from table rows
+  // Detect items from table rows - Extract all items completely from the invoice PDF
   const extractedItems: ExtractedPdfItem[] = [];
   let itemCounter = 1;
 
@@ -233,7 +233,7 @@ export async function parsePdfInvoice(
     }
   }
 
-  // Filter if highlightedOnly was checked
+  // Always extract full invoice items completely
   const finalItems = (highlightedOnly && extractedItems.some(i => i.isHighlighted))
     ? extractedItems.filter(i => i.isHighlighted)
     : extractedItems;

@@ -182,16 +182,28 @@ export function App() {
     totalScannedQty = 0, 
     totalLineItems = 0
   ) => {
-    setSummaryModalState({
-      isOpen: true,
-      invoiceNo,
-      discardedCount: discarded,
-      archivedDiscrepancies: discList,
-      totalRequiredQty,
-      totalScannedQty,
-      totalLineItems,
-    });
+    // If invoice is completely clean (100% matched), skip modal blocker and instantly transfer to scanner cell!
+    if (discList.length === 0) {
+      setTimeout(() => {
+        const input = document.getElementById('barcode-input') as HTMLInputElement | null;
+        if (input) {
+          input.value = '';
+          input.focus();
+        }
+      }, 50);
+    } else {
+      setSummaryModalState({
+        isOpen: true,
+        invoiceNo,
+        discardedCount: discarded,
+        archivedDiscrepancies: discList,
+        totalRequiredQty,
+        totalScannedQty,
+        totalLineItems,
+      });
+    }
     refreshDiscrepancies();
+    refreshWrongPickings();
   };
 
   // STEP A: Lock onto Invoice
@@ -463,6 +475,12 @@ export function App() {
             onInvoiceCompleted={handleInvoiceCompleted}
             onOpenSyncModal={() => setIsSyncModalOpen(true)}
             lastScannedCode={lastScannedBarcode}
+            discrepancies={discrepancies}
+            wrongPickings={wrongPickings}
+            onRefreshDiscrepancies={() => {
+              refreshDiscrepancies();
+              refreshWrongPickings();
+            }}
           />
         )}
 
@@ -472,6 +490,16 @@ export function App() {
             settings={settings}
             lastScannedCode={lastScannedBarcode}
             onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
+            onTransferToAudit={(invoiceNo) => {
+              lockInvoiceByBarcode(invoiceNo);
+              setCurrentTab('audit');
+            }}
+            discrepancies={discrepancies}
+            wrongPickings={wrongPickings}
+            onRefreshDiscrepancies={() => {
+              refreshDiscrepancies();
+              refreshWrongPickings();
+            }}
           />
         )}
 
@@ -592,7 +620,16 @@ export function App() {
       {/* Invoice Evaluation & Switch Summary Modal */}
       <InvoiceSummaryModal
         isOpen={summaryModalState.isOpen}
-        onClose={() => setSummaryModalState(prev => ({ ...prev, isOpen: false }))}
+        onClose={() => {
+          setSummaryModalState(prev => ({ ...prev, isOpen: false }));
+          setTimeout(() => {
+            const input = document.getElementById('barcode-input') as HTMLInputElement | null;
+            if (input) {
+              input.value = '';
+              input.focus();
+            }
+          }, 50);
+        }}
         invoiceNo={summaryModalState.invoiceNo}
         discardedCount={summaryModalState.discardedCount}
         archivedDiscrepancies={summaryModalState.archivedDiscrepancies}
@@ -610,6 +647,13 @@ export function App() {
         onContinueScanning={() => {
           setSummaryModalState(prev => ({ ...prev, isOpen: false }));
           setCurrentTab('audit');
+          setTimeout(() => {
+            const input = document.getElementById('barcode-input') as HTMLInputElement | null;
+            if (input) {
+              input.value = '';
+              input.focus();
+            }
+          }, 50);
         }}
       />
     </div>

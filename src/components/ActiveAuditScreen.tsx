@@ -37,6 +37,7 @@ import type {
   ScannedAuditItem, 
   AuditDiscrepancy,
   WrongPickingItem,
+  WrongPickingRecord,
   AppSettings,
   IncompleteInvoiceRecord,
   CompletedInvoiceRecord,
@@ -64,6 +65,7 @@ import {
 import { SoundEffects } from '../services/audio';
 import { translations } from '../services/i18n';
 import { CameraQrScannerModal } from './CameraQrScannerModal';
+import { InternalDiscrepancyModal } from './InternalDiscrepancyModal';
 
 interface ActiveAuditScreenProps {
   activeSession: ActiveInvoiceSession | null;
@@ -80,6 +82,9 @@ interface ActiveAuditScreenProps {
   ) => void;
   onOpenSyncModal: () => void;
   lastScannedCode: string | null;
+  discrepancies?: AuditDiscrepancy[];
+  wrongPickings?: WrongPickingRecord[];
+  onRefreshDiscrepancies?: () => void;
 }
 
 // Normalizes barcode strings to ensure robust random matching (ignores leading zeroes and whitespace)
@@ -105,6 +110,9 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
   onInvoiceCompleted,
   onOpenSyncModal,
   lastScannedCode,
+  discrepancies = [],
+  wrongPickings = [],
+  onRefreshDiscrepancies = () => {},
 }) => {
   const t = translations[settings.language] || translations.en;
   const isRtl = settings.language === 'ar';
@@ -118,6 +126,7 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
   const [activeTabFilter, setActiveTabFilter] = useState<'ALL' | 'PENDING' | 'EXACT' | 'DISCREPANCIES'>('ALL');
   const [isCameraQrOpen, setIsCameraQrOpen] = useState(false);
   const [isIncompleteDrawerOpen, setIsIncompleteDrawerOpen] = useState(false);
+  const [isInternalDiscrepancyOpen, setIsInternalDiscrepancyOpen] = useState(false);
   
   // Blocked Completed Invoice Warning Modal
   const [blockedInvoiceWarning, setBlockedInvoiceWarning] = useState<{
@@ -168,8 +177,15 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
   const focusAndClearInput = () => {
     setManualInput('');
     setTimeout(() => {
-      scannerInputRef.current?.focus();
-    }, 50);
+      if (scannerInputRef.current) {
+        scannerInputRef.current.focus();
+      }
+      const el = document.getElementById('barcode-input') as HTMLInputElement | null;
+      if (el) {
+        el.focus();
+        el.select();
+      }
+    }, 40);
   };
 
   useEffect(() => {
@@ -904,6 +920,22 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Quick Internal Discrepancy report trigger */}
+            <button
+              type="button"
+              onClick={() => setIsInternalDiscrepancyOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-red-950/80 hover:bg-red-900 border border-red-700/60 text-red-300 text-[11px] font-bold transition-all shadow-sm"
+              title="عرض تقرير النواقص والأخطاء (داخلي)"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+              <span>{isRtl ? 'الأخطاء والنواقص' : 'Discrepancies'}</span>
+              {(discrepancies.length > 0 || wrongPickings.length > 0) && (
+                <span className="text-[9px] bg-red-600 text-white px-1.5 py-0.2 rounded-full font-black">
+                  {discrepancies.length + wrongPickings.length}
+                </span>
+              )}
+            </button>
+
             {/* View Incomplete Queue quick button */}
             {incompleteInvoices.length > 0 && (
               <button
@@ -935,6 +967,7 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
             </div>
             <input
               ref={scannerInputRef}
+              id="barcode-input"
               data-scanner-input="true"
               type="text"
               value={manualInput}
@@ -1792,6 +1825,16 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
         }}
         expectedType={!activeSession ? 'INVOICE_OR_ORDER' : 'ITEM_OR_INVOICE'}
         activeInvoiceNo={activeSession?.invoiceNo}
+      />
+
+      {/* Internal Discrepancies Modal (خدمة داخلية مكررة في الواجهة) */}
+      <InternalDiscrepancyModal
+        isOpen={isInternalDiscrepancyOpen}
+        onClose={() => setIsInternalDiscrepancyOpen(false)}
+        discrepancies={discrepancies}
+        wrongPickings={wrongPickings}
+        onRefresh={onRefreshDiscrepancies}
+        settings={settings}
       />
     </div>
   );

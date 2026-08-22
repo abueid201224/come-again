@@ -29,7 +29,10 @@ import {
   X,
   FileCheck2,
   Mail,
-  AlertCircle
+  AlertCircle,
+  Truck,
+  Zap,
+  CheckCheck
 } from 'lucide-react';
 import type { 
   AppSettings, 
@@ -39,7 +42,9 @@ import type {
   PaymentMethod,
   ReturnReportStatus,
   LabDecision,
-  RefundRequestRecord
+  RefundRequestRecord,
+  AuditDiscrepancy,
+  WrongPickingRecord
 } from '../types';
 import { parsePdfInvoice } from '../services/pdfService';
 import { 
@@ -54,15 +59,21 @@ import {
   getAllReturnReports, 
   saveReturnReport, 
   deleteReturnReport,
-  getOverdueLabReportsCount 
+  getOverdueLabReportsCount,
+  saveMasterItems 
 } from '../services/db';
 import { SoundEffects } from '../services/audio';
 import { ReopenConfirmationModal } from './ReopenConfirmationModal';
+import { InternalDiscrepancyModal } from './InternalDiscrepancyModal';
 
 interface ReturnsScreenProps {
   settings: AppSettings;
   lastScannedCode?: string | null;
   onOpenAuditorModal?: () => void;
+  onTransferToAudit?: (invoiceNo: string, items?: Array<{ itemCode: string; itemName: string; unit: string; requiredQty: number; orderNo?: string }>) => void;
+  discrepancies?: AuditDiscrepancy[];
+  wrongPickings?: WrongPickingRecord[];
+  onRefreshDiscrepancies?: () => void;
 }
 
 type ReturnsSubTab = 'editor' | 'pending_lab' | 'refunds' | 'completed_archive';
@@ -71,6 +82,10 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
   settings,
   lastScannedCode,
   onOpenAuditorModal,
+  onTransferToAudit,
+  discrepancies = [],
+  wrongPickings = [],
+  onRefreshDiscrepancies = () => {},
 }) => {
   const isRtl = settings.language === 'ar';
 
@@ -98,10 +113,13 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
   const [generalNotes, setGeneralNotes] = useState('');
   const [scanNotification, setScanNotification] = useState<{ message: string; type: 'INVOICE' | 'ORDER' | 'ITEM' } | null>(null);
 
+  // Full Return vs Scan-driven Return State
+  const [isFullInvoiceReturn, setIsFullInvoiceReturn] = useState<boolean>(false);
+  const [isInternalDiscrepancyOpen, setIsInternalDiscrepancyOpen] = useState<boolean>(false);
+
   // Filtering & Scanning State
   const [filterQuery, setFilterQuery] = useState('');
   const [selectedConditionFilter, setSelectedConditionFilter] = useState<string>('ALL');
-  const [isHighlightFilterActive, setIsHighlightFilterActive] = useState(false);
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
   const [manualBarcode, setManualBarcode] = useState('');
 
@@ -253,14 +271,74 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
     });
   }, [lastScannedCode, activeSubTab, settings.soundEnabled, settings.soundVolume, isRtl]);
 
-  // Handle PDF Smart Extraction
+  // Toggle full invoice return (ارتجاع الفاتورة كاملة)
+  const handleToggleFullInvoiceReturn = (enable: boolean) => {
+    setIsFullInvoiceReturn(enable);
+    setReturnItems(prev => prev.map(item => {
+      const targetQty = enable ? item.invoicedQty : item.scannedQty;
+      return {
+        ...item,
+        actualReturnedQty: targetQty,
+        scannedQty: enable ? item.invoicedQty : item.scannedQty,
+        refundTotal: targetQty * (item.unitPrice || 0),
+      };
+    }));
+    if (enable) {
+      if (settings.soundEnabled) SoundEffects.playExactComplete(settings.soundVolume);
+      setScanNotification({
+        message: isRtl 
+          ? '⚡ تم تفعيل ارتجاع الفاتورة كاملة (100% مطابقة لكافة الكميات).' 
+          : '⚡ Full invoice return activated (100% quantity match).',
+        type: 'INVOICE'
+      });
+    } else {
+      if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
+      setScanNotification({
+        message: isRtl 
+          ? 'تم التحويل لوضع التحقق والارتجاع بالمسح الفعلي بالسكانر.' 
+          : 'Switched to scan-driven return verification.',
+        type: 'INVOICE'
+      });
+    }
+  };
+
+  // Direct sync to Dispatch Audit Workstation (تأكيد ومراجعة في خدمة مدقق الفواتير والتجهيز)
+  const handleSyncToAuditWorkstation = async () => {
+    if (returnItems.length === 0 || !originalInvoiceNo.trim()) {
+      alert(isRtl ? 'يرجى التأكد من استخلاص أصناف الفاتورة ورقم الفاتورة الأصلية أولاً.' : 'Please load invoice items and invoice number first.');
+      return;
+    }
+    const masterItemsToSave = returnItems.map((item, idx) => ({
+      invoiceNo: originalInvoiceNo.trim(),
+      orderNo: orderNo.trim() || undefined,
+      itemCode: item.itemCode,
+      itemName: item.itemName,
+      unit: item.unit || 'PCS',
+      requiredQty: isFullInvoiceReturn ? item.invoicedQty : (item.actualReturnedQty > 0 ? item.actualReturnedQty : item.invoicedQty),
+      originalIndex: idx,
+    }));
+    
+    await saveMasterItems(masterItemsToSave);
+    if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
+
+    if (onTransferToAudit) {
+      onTransferToAudit(originalInvoiceNo.trim(), masterItemsToSave);
+    } else {
+      alert(isRtl 
+        ? `✅ تم تسجيل ${masterItemsToSave.length} صنف في قاعدة بيانات الفحص. انتقل إلى خدمة مدقق الفواتير لبدء المسح.` 
+        : `✅ Synced ${masterItemsToSave.length} items to audit database.`
+      );
+    }
+  };
+
+  // Handle PDF Smart Extraction (Full invoice extraction without highlight filtering)
   const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setIsLoadingPdf(true);
     try {
-      const extracted = await parsePdfInvoice(file, isHighlightFilterActive);
+      const extracted = await parsePdfInvoice(file, false);
       if (extracted.documentNo) setOriginalInvoiceNo(extracted.documentNo);
       if (extracted.orderNo) {
         const cleanOrder = extracted.orderNo.replace(/^new/i, '').trim();
@@ -273,23 +351,32 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
       if (extracted.customerName) setCustomerName(extracted.customerName);
       if (extracted.paymentMethod) setPaymentMethod(extracted.paymentMethod);
 
-      const items: ReturnSessionItem[] = extracted.items.map(item => ({
-        id: item.id || `ret-${Math.random()}`,
-        itemCode: item.itemCode,
-        itemName: item.itemName,
-        unit: item.unit || 'PCS',
-        invoicedQty: item.quantity,
-        actualReturnedQty: item.quantity,
-        scannedQty: 0,
-        unitPrice: item.unitPrice || 0,
-        refundTotal: item.quantity * (item.unitPrice || 0),
-        condition: 'VALID_FOR_RESTOCK', // Default under inspection: صالحة للمستودع
-        isIncludedInRefund: true,
-        notes: item.isHighlighted ? 'تم استخلاص الصنف من الباركود المظلل' : '',
-      }));
+      const items: ReturnSessionItem[] = extracted.items.map(item => {
+        const initialQty = isFullInvoiceReturn ? item.quantity : 0;
+        return {
+          id: item.id || `ret-${Math.random()}`,
+          itemCode: item.itemCode,
+          itemName: item.itemName,
+          unit: item.unit || 'PCS',
+          invoicedQty: item.quantity,
+          actualReturnedQty: initialQty,
+          scannedQty: initialQty,
+          unitPrice: item.unitPrice || 0,
+          refundTotal: initialQty * (item.unitPrice || 0),
+          condition: 'VALID_FOR_RESTOCK', // Default under inspection: صالحة للمستودع
+          isIncludedInRefund: true,
+          notes: '',
+        };
+      });
 
       setReturnItems(items);
       if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
+      setScanNotification({
+        message: isRtl 
+          ? `✅ تم استخلاص الفاتورة كاملة بنجاح (${items.length} صنف). ابدأ المسح للتحقق أو اختر ارتجاع كامل.` 
+          : `✅ Extracted full invoice (${items.length} items). Scan to verify or select full return.`,
+        type: 'INVOICE'
+      });
     } catch (err) {
       alert(`خطأ في قراءة ملف PDF: ${(err as Error).message}`);
     } finally {
@@ -314,20 +401,24 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
           setReturnReceiptNo(formatReturnReceiptNo(finalOrder));
         }
         
-        const items: ReturnSessionItem[] = parsed.items.map((item, idx) => ({
-          id: `ret-excel-${idx}-${Date.now()}`,
-          itemCode: item.itemCode,
-          itemName: item.itemName,
-          unit: item.unit,
-          invoicedQty: item.requiredQty,
-          actualReturnedQty: item.requiredQty,
-          scannedQty: 0,
-          unitPrice: 0,
-          refundTotal: 0,
-          condition: 'VALID_FOR_RESTOCK',
-          isIncludedInRefund: true,
-        }));
+        const items: ReturnSessionItem[] = parsed.items.map((item, idx) => {
+          const initialQty = isFullInvoiceReturn ? item.requiredQty : 0;
+          return {
+            id: `ret-excel-${idx}-${Date.now()}`,
+            itemCode: item.itemCode,
+            itemName: item.itemName,
+            unit: item.unit,
+            invoicedQty: item.requiredQty,
+            actualReturnedQty: initialQty,
+            scannedQty: initialQty,
+            unitPrice: 0,
+            refundTotal: 0,
+            condition: 'VALID_FOR_RESTOCK',
+            isIncludedInRefund: true,
+          };
+        });
         setReturnItems(items);
+        if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
       }
     } catch (err) {
       alert(`خطأ في قراءة ملف Excel: ${(err as Error).message}`);
@@ -804,18 +895,53 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                 </div>
               </div>
 
-              {/* Barcode Highlight extraction toggle */}
-              <label className="flex items-center gap-2 cursor-pointer bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800 text-xs font-semibold text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={isHighlightFilterActive}
-                  onChange={(e) => setIsHighlightFilterActive(e.target.checked)}
-                  className="rounded border-slate-700 text-amber-500 focus:ring-amber-500"
-                />
-                <span className="text-amber-300">
-                  {isRtl ? 'استخلاص الأصناف ذات الباركود المظلل فقط من الـ PDF' : 'Extract Highlighted Barcodes Only'}
-                </span>
-              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Full invoice return toggle */}
+                <button
+                  type="button"
+                  onClick={() => handleToggleFullInvoiceReturn(!isFullInvoiceReturn)}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-bold transition-all shadow-sm ${
+                    isFullInvoiceReturn
+                      ? 'bg-emerald-600 text-white border-emerald-400 ring-2 ring-emerald-500/50'
+                      : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-emerald-500'
+                  }`}
+                  title="تحديد كامل الكميات كمرتجع بنسبة 100% فوراً"
+                >
+                  <CheckCheck className={`w-4 h-4 ${isFullInvoiceReturn ? 'text-white' : 'text-slate-400'}`} />
+                  <span>
+                    {isRtl 
+                      ? (isFullInvoiceReturn ? '✓ تم تفعيل ارتجاع الفاتورة كاملة' : '⚡ خيار: ارتجاع الفاتورة كاملة (100%)')
+                      : (isFullInvoiceReturn ? '✓ Full Invoice Return Active' : '⚡ Return Full Invoice')}
+                  </span>
+                </button>
+
+                {/* Audit workstation confirmation sync */}
+                <button
+                  type="button"
+                  onClick={handleSyncToAuditWorkstation}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-bold border border-indigo-500/50 shadow-sm transition-all"
+                  title="تأكيد ومراجعة في خدمة مدقق الفواتير والتجهيز بالمسح الفعلي"
+                >
+                  <Truck className="w-4 h-4 text-indigo-200" />
+                  <span>{isRtl ? 'تأكيد بالمسح في مدقق الفواتير' : 'Verify in Dispatch Audit'}</span>
+                </button>
+
+                {/* Internal Discrepancies report trigger */}
+                <button
+                  type="button"
+                  onClick={() => setIsInternalDiscrepancyOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-950/80 hover:bg-red-900 text-xs font-bold text-red-300 border border-red-700/60 shadow-sm transition-all"
+                  title="عرض تقرير النواقص والأخطاء (داخلي)"
+                >
+                  <AlertTriangle className="w-4 h-4 text-red-400" />
+                  <span>{isRtl ? 'تقرير الأخطاء والنواقص' : 'Discrepancies'}</span>
+                  {(discrepancies.length > 0 || wrongPickings.length > 0) && (
+                    <span className="text-[10px] bg-red-600 text-white px-1.5 py-0.2 rounded-full font-bold">
+                      {discrepancies.length + wrongPickings.length}
+                    </span>
+                  )}
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
@@ -2020,6 +2146,16 @@ ${methodLines || 'لا توجد طلبات مسجلة'}
           </div>
         </div>
       )}
+
+      {/* Internal Discrepancy Modal (خدمة داخلية مكررة في الواجهة) */}
+      <InternalDiscrepancyModal
+        isOpen={isInternalDiscrepancyOpen}
+        onClose={() => setIsInternalDiscrepancyOpen(false)}
+        discrepancies={discrepancies}
+        wrongPickings={wrongPickings}
+        onRefresh={onRefreshDiscrepancies}
+        settings={settings}
+      />
     </div>
   );
 };
