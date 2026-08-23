@@ -113,9 +113,9 @@ export async function parsePdfInvoice(
     }
   }
 
-  // 2. Detect Order Number: Starts from the left with '200' or 'new200' (e.g. 200891234 or new200891234)
+  // 2. Detect Order Number: Starts from the left with '200' or 'return200' / 'new200'
   let orderNo = '';
-  const order200Match = fullText.match(/\b((?:new)?200\d{3,20})\b/i);
+  const order200Match = fullText.match(/\b((?:return|new)?200\d{3,20})\b/i);
   if (order200Match && order200Match[1]) {
     orderNo = order200Match[1].trim();
   } else {
@@ -126,11 +126,11 @@ export async function parsePdfInvoice(
     }
   }
 
-  // 3. Return Receipt Number: Always 'new' + Order Number from the far left without delimiters
+  // 3. Return Receipt Number: Always 'return' + Order Number from the far left without delimiters
   let returnReceiptNo = '';
   if (orderNo) {
-    const cleanOrder = orderNo.replace(/^new/i, '').trim();
-    returnReceiptNo = `new${cleanOrder}`;
+    const cleanOrder = orderNo.replace(/^(?:return|new)/i, '').trim();
+    returnReceiptNo = `return${cleanOrder}`;
   }
 
   // Detect Customer / Vendor Name

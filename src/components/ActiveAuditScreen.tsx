@@ -1152,12 +1152,6 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
                     <span className="text-xs font-bold uppercase tracking-wider text-emerald-300 bg-emerald-950 px-2.5 py-0.5 rounded-full border border-emerald-700/60">
                       {t.activeInvoice}
                     </span>
-                    {activeSession.orderNo && (
-                      <span className="text-xs font-bold bg-indigo-950 text-indigo-300 px-2.5 py-0.5 rounded-full border border-indigo-700/60 font-mono flex items-center gap-1">
-                        <Hash className="w-3.5 h-3.5" />
-                        <span>{t.orderNumberLabel} {activeSession.orderNo}</span>
-                      </span>
-                    )}
                     <span className="text-xs text-slate-400 font-mono">
                       {new Date(activeSession.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </span>
@@ -1199,9 +1193,24 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
                       )}
                     </div>
                   </div>
-                  <h2 className="text-2xl sm:text-3xl font-black font-mono text-white tracking-tight mt-1">
-                    {activeSession.invoiceNo}
-                  </h2>
+
+                  {/* Invoice Number & Order Number with IDENTICAL prominent font size side-by-side */}
+                  <div className="flex items-center gap-3 sm:gap-4 flex-wrap mt-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-slate-400 uppercase">{isRtl ? 'فاتورة:' : 'Inv:'}</span>
+                      <h2 className="text-2xl sm:text-3xl font-black font-mono text-white tracking-tight">
+                        {activeSession.invoiceNo}
+                      </h2>
+                    </div>
+                    {activeSession.orderNo && (
+                      <div className="flex items-center gap-2 border-r sm:border-r-2 border-slate-700 pr-3 sm:pr-4 rtl:border-r-0 rtl:border-l rtl:pl-3 rtl:sm:pl-4">
+                        <span className="text-xs font-bold text-indigo-400 uppercase">{isRtl ? 'أوردر:' : 'Order:'}</span>
+                        <h2 className="text-2xl sm:text-3xl font-black font-mono text-indigo-300 tracking-tight">
+                          {activeSession.orderNo}
+                        </h2>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 

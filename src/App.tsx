@@ -615,6 +615,12 @@ export function App() {
         onClose={() => setIsAuditorModalOpen(false)}
         settings={settings}
         onSaveSettings={handleUpdateSettings}
+        onSaveAuditorInfo={(info) => {
+          handleUpdateSettings({
+            ...settings,
+            ...info,
+          });
+        }}
       />
 
       {/* Invoice Evaluation & Switch Summary Modal */}

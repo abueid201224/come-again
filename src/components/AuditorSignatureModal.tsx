@@ -16,12 +16,13 @@ interface AuditorSignatureModalProps {
   isOpen: boolean;
   onClose: () => void;
   settings: AppSettings;
-  onSaveAuditorInfo: (info: {
+  onSaveAuditorInfo?: (info: {
     auditorName: string;
     auditorId: string;
     auditorTitle: string;
     auditorSignature?: string;
   }) => void;
+  onSaveSettings?: (newSettings: AppSettings) => void;
   language?: 'ar' | 'en';
 }
 
@@ -30,6 +31,7 @@ export const AuditorSignatureModal: React.FC<AuditorSignatureModalProps> = ({
   onClose,
   settings,
   onSaveAuditorInfo,
+  onSaveSettings,
   language = 'ar',
 }) => {
   const isRtl = language === 'ar';
@@ -195,12 +197,22 @@ export const AuditorSignatureModal: React.FC<AuditorSignatureModalProps> = ({
       finalSignature = canvasRef.current.toDataURL('image/png');
     }
 
-    onSaveAuditorInfo({
+    const updatedInfo = {
       auditorName: cleanName,
       auditorId: cleanId,
       auditorTitle: cleanTitle,
       auditorSignature: finalSignature,
-    });
+    };
+
+    if (typeof onSaveAuditorInfo === 'function') {
+      onSaveAuditorInfo(updatedInfo);
+    }
+    if (typeof onSaveSettings === 'function') {
+      onSaveSettings({
+        ...settings,
+        ...updatedInfo,
+      });
+    }
     onClose();
   };
 

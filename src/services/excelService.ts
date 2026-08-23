@@ -1897,3 +1897,303 @@ export function exportWorkerPickingSheetPdf(
   doc.save(`Picking_Sheet_${wave.waveNo}_${group.groupId}.pdf`);
 }
 
+// ===================================================================
+// Specialized Quality Lab Weekly Saturday Transfer Report (Screenshot 1 Format)
+// ===================================================================
+export function exportSaturdayWeeklyLabReportToExcel(
+  reports: any[],
+  filterLabOnly: boolean = false
+): void {
+  // Extract items from reports
+  const allItems: any[] = [];
+  let reportCounter = 1;
+
+  reports.forEach(r => {
+    const isLabReport = r.status === 'PENDING_LAB' || (r.items || []).some((i: any) => i.condition === 'TRANSFERRED_TO_LAB');
+    if (filterLabOnly && !isLabReport) return;
+
+    (r.items || []).forEach((item: any) => {
+      if (filterLabOnly && item.condition !== 'TRANSFERRED_TO_LAB') return;
+
+      const inspectionNo = String(reportCounter).padStart(6, '0');
+      const inspectionDate = r.createdAt ? new Date(r.createdAt).toLocaleDateString('en-US') : new Date().toLocaleDateString('en-US');
+      const magentoOrderNo = r.orderNo ? r.orderNo.replace(/^(?:return|new)/i, '') : '-';
+      const oracleRmaNo = r.returnReceiptNo || (r.orderNo ? `return${r.orderNo.replace(/^(?:return|new)/i, '')}` : '-');
+      
+      // Extract size & color if not explicitly defined
+      let extractedSize = item.size || '';
+      let extractedColor = item.color || '-';
+      if (!extractedSize) {
+        const sizeMatch = (item.itemName || '').match(/\b(XS|S|M|L|XL|XXL|2XL|3XL|4XL|5XL|6XL|\d{2}[RSL]?)\b/i);
+        if (sizeMatch) extractedSize = sizeMatch[1].toUpperCase();
+        else extractedSize = 'L';
+      }
+      if (extractedColor === '-') {
+        if (/أبيض|ابيض|white/i.test(item.itemName || '')) extractedColor = 'أبيض';
+        else if (/أسود|اسود|black/i.test(item.itemName || '')) extractedColor = 'أسود';
+        else if (/أزرق|ازرق|blue/i.test(item.itemName || '')) extractedColor = 'كحلي/أزرق';
+      }
+
+      const packagingCond = item.packagingCondition || 'مغلق بتغليف المصنع';
+      const reason = item.reasonText || (item.reason === 'CUSTOMER_REFUSED' ? 'رفض العميل الاستلام' : item.reason === 'DEFECTIVE' ? 'عيب صناعة' : 'مرتجع');
+      const decision = item.condition === 'TRANSFERRED_TO_LAB' || item.inspectionDecision === 'LAB' 
+        ? 'تحويل للمعمل الفني' 
+        : 'إعادة للمخزن الصالح';
+      const inspector = item.inspectorName || r.auditorName || 'أحمد عيد';
+
+      allItems.push({
+        inspectionNo,
+        inspectionDate,
+        magentoOrderNo,
+        oracleRmaNo,
+        sku: item.itemCode,
+        productName: item.itemName,
+        size: extractedSize,
+        color: extractedColor,
+        packagingCondition: packagingCond,
+        returnReason: reason,
+        decision,
+        inspectorName: inspector,
+        qty: item.actualReturnedQty || item.scannedQty || 1,
+      });
+
+      reportCounter++;
+    });
+  });
+
+  if (allItems.length === 0) {
+    alert('لا توجد أصناف محولة للمعمل أو مرتجعات مطابقة للفحص للتصدير.');
+    return;
+  }
+
+  // Construct structured 2D array matching Screenshot 1 exactly
+  const aoa: any[][] = [];
+
+  // Row 1: Headers
+  aoa.push([
+    'رقم تقرير الفحص',
+    'تاريخ الفحص',
+    'رقم طلب مجينتو',
+    'رقم أوراكل RMA',
+    'رمز المنتج SKU',
+    'اسم المنتج',
+    'المقاس',
+    'اللون',
+    'حالة التغليف للملابس الداخلية',
+    'سبب الإرجاع',
+    'قرار الفحص المبدئي',
+    'اسم فاحص الجودة'
+  ]);
+
+  // Data rows
+  allItems.forEach(row => {
+    aoa.push([
+      row.inspectionNo,
+      row.inspectionDate,
+      row.magentoOrderNo,
+      row.oracleRmaNo,
+      row.sku,
+      row.productName,
+      row.size,
+      row.color,
+      row.packagingCondition,
+      row.returnReason,
+      row.decision,
+      row.inspectorName
+    ]);
+  });
+
+  // Empty spacer rows
+  aoa.push([]);
+  aoa.push([]);
+
+  // Lab Transfer Bottom Section (Screenshot 1 Section)
+  const transferHeaderRowIndex = aoa.length;
+  aoa.push(['بيانات التحويل للمعمل الفني']);
+  aoa.push(['اسم معمل الاستلام:', 'معمل النسيج وفحص الجودة المركزي']);
+  aoa.push(['طبيعة الاختبار:', 'فحص عيوب التصنيع ومطابقة التغليف والقياسات']);
+  aoa.push(['تاريخ التحويل:', new Date().toLocaleDateString('ar-EG')]);
+  aoa.push([]);
+  aoa.push([
+    'موظف المستودع: _____________________  التوقيع:',
+    '',
+    '',
+    'مسؤول الجودة: _____________________  التوقيع:',
+    '',
+    '',
+    '',
+    'مستلم المعمل: _____________________  التوقيع:'
+  ]);
+
+  const worksheet = XLSX.utils.aoa_to_sheet(aoa);
+
+  // Column widths
+  worksheet['!cols'] = [
+    { wch: 18 }, // رقم تقرير الفحص
+    { wch: 14 }, // تاريخ الفحص
+    { wch: 18 }, // رقم طلب مجينتو
+    { wch: 22 }, // رقم أوراكل RMA
+    { wch: 18 }, // رمز المنتج SKU
+    { wch: 32 }, // اسم المنتج
+    { wch: 10 }, // المقاس
+    { wch: 12 }, // اللون
+    { wch: 28 }, // حالة التغليف
+    { wch: 22 }, // سبب الإرجاع
+    { wch: 22 }, // قرار الفحص
+    { wch: 20 }  // اسم فاحص الجودة
+  ];
+
+  // Merges for Lab Transfer Header
+  worksheet['!merges'] = [
+    { s: { r: transferHeaderRowIndex, c: 0 }, e: { r: transferHeaderRowIndex, c: 11 } }
+  ];
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'تقرير فحص وتحويل المعمل');
+
+  const saturdayDate = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(workbook, `تقرير_الحبات_المحولة_للمعمل_الاسبوعي_سبت_${saturdayDate}.xlsx`);
+}
+
+// ===================================================================
+// Specialized Refund Request Excel Generator (Screenshot 2 Format)
+// ===================================================================
+export function exportRefundRequestExcelFormatted(report: any): void {
+  if (!report || !report.items || report.items.length === 0) {
+    alert('لا توجد أصناف في طلب الاسترداد للتصدير.');
+    return;
+  }
+
+  const cleanOrderNo = report.orderNo ? report.orderNo.replace(/^(?:return|new)/i, '') : '-';
+  const reportDate = report.createdAt ? new Date(report.createdAt).toLocaleDateString('en-US') : new Date().toLocaleDateString('en-US');
+  const invoiceNo = report.originalInvoiceNo || '-';
+
+  // Construct AOA matching Screenshot 2 precisely
+  const aoa: any[][] = [];
+
+  // Row 1: Header Banner "Refund Request"
+  aoa.push(['Refund Request', '']);
+
+  // Row 2: Date
+  aoa.push(['Date:', reportDate]);
+
+  // Row 3: Order No
+  aoa.push(['Order No:', cleanOrderNo]);
+
+  // Row 4: Invoice No
+  aoa.push(['Invoice No:', invoiceNo]);
+
+  // Row 5: Table Header
+  aoa.push(['Refund SKU', 'Quantity']);
+
+  // Rows 6..N: SKUs and Quantities
+  const startDataRow = 6; // 1-indexed
+  const refundItems = (report.items || []).filter((i: any) => i.isIncludedInRefund !== false && (Number(i.actualReturnedQty) > 0 || Number(i.scannedQty) > 0));
+  const activeItems = refundItems.length > 0 ? refundItems : report.items;
+
+  activeItems.forEach((item: any) => {
+    aoa.push([
+      item.itemCode,
+      Number(item.actualReturnedQty || item.scannedQty || 1)
+    ]);
+  });
+
+  const endDataRow = startDataRow + activeItems.length - 1;
+
+  // Payment Method Name
+  let paymentInfo = PAYMENT_METHOD_NAMES[report.paymentMethod] || report.paymentMethod || 'نقدي (Cash)';
+  if (report.paymentMethod === 'CARD') {
+    paymentInfo = 'بطاقة مدى / ائتمانية (Card Payment)';
+  } else if (report.paymentMethod === 'COD') {
+    paymentInfo = 'دفع عند الاستلام (Cash on Delivery)';
+  } else if (report.paymentMethod === 'BANK_TRANSFER') {
+    paymentInfo = 'تحويل بنكي لحساب العميل (Bank Wire)';
+  } else if (report.paymentMethod === 'CREDIT_BALANCE') {
+    paymentInfo = 'رصيد دائن / تابي - تمارا 4 دفعات بدون فوائد';
+  }
+
+  // Reason for refund
+  const refundReason = report.notes || (activeItems[0]?.reasonText) || (activeItems[0]?.reason === 'CUSTOMER_REFUSED' ? 'رفض العميل الاستلام' : 'مرتجع');
+
+  // Payment Information Row
+  aoa.push(['Payment Information:', paymentInfo]);
+
+  // Reason for Refund Row
+  aoa.push(['Reason for Refund:', refundReason]);
+
+  // Total Refund Amount Row (with Excel Formula SUM or calculated total amount)
+  const totalRefund = Number(report.totalRefundAmount || activeItems.reduce((s: number, i: any) => s + (Number(i.refundTotal) || (Number(i.actualReturnedQty || 1) * Number(i.unitPrice || 0))), 0)).toFixed(2);
+  aoa.push(['Total Refund Amount:', `${totalRefund} SAR`]);
+
+  const worksheet = XLSX.utils.aoa_to_sheet(aoa);
+
+  // Column Widths
+  worksheet['!cols'] = [
+    { wch: 28 },
+    { wch: 36 }
+  ];
+
+  // Merge Row 1 Title
+  worksheet['!merges'] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } }
+  ];
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Refund Request');
+
+  const receiptRef = report.returnReceiptNo || `return${cleanOrderNo}`;
+  XLSX.writeFile(workbook, `Refund_Request_${receiptRef}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
+// Export All Refund Requests in the Screenshot 2 Layout (Multi-Sheet Workbook)
+export function exportAllRefundRequestsExcelFormatted(reports: any[]): void {
+  const completedRefunds = reports.filter(r => r.status === 'COMPLETED' || r.totalRefundAmount > 0);
+  if (completedRefunds.length === 0) {
+    alert('لا توجد طلبات استرداد مكتملة للتصدير.');
+    return;
+  }
+
+  const workbook = XLSX.utils.book_new();
+
+  completedRefunds.forEach((report, index) => {
+    const cleanOrderNo = report.orderNo ? report.orderNo.replace(/^(?:return|new)/i, '') : `ORD-${index + 1}`;
+    const reportDate = report.createdAt ? new Date(report.createdAt).toLocaleDateString('en-US') : new Date().toLocaleDateString('en-US');
+    const invoiceNo = report.originalInvoiceNo || '-';
+
+    const aoa: any[][] = [];
+    aoa.push(['Refund Request', '']);
+    aoa.push(['Date:', reportDate]);
+    aoa.push(['Order No:', cleanOrderNo]);
+    aoa.push(['Invoice No:', invoiceNo]);
+    aoa.push(['Refund SKU', 'Quantity']);
+
+    const refundItems = (report.items || []).filter((i: any) => i.isIncludedInRefund !== false);
+    const activeItems = refundItems.length > 0 ? refundItems : report.items;
+
+    activeItems.forEach((item: any) => {
+      aoa.push([
+        item.itemCode,
+        Number(item.actualReturnedQty || item.scannedQty || 1)
+      ]);
+    });
+
+    let paymentInfo = PAYMENT_METHOD_NAMES[report.paymentMethod] || report.paymentMethod || 'نقدي (Cash)';
+    const refundReason = report.notes || 'مرتجع من العميل';
+    const totalRefund = Number(report.totalRefundAmount || 0).toFixed(2);
+
+    aoa.push(['Payment Information:', paymentInfo]);
+    aoa.push(['Reason for Refund:', refundReason]);
+    aoa.push(['Total Refund Amount:', `${totalRefund} SAR`]);
+
+    const worksheet = XLSX.utils.aoa_to_sheet(aoa);
+    worksheet['!cols'] = [{ wch: 28 }, { wch: 36 }];
+    worksheet['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 1 } }];
+
+    const sheetName = `Refund_${cleanOrderNo}`.slice(0, 31);
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+  });
+
+  const timestamp = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(workbook, `طلبات_الاسترداد_المالي_المجمعة_Excel_${timestamp}.xlsx`);
+}
+

@@ -53,7 +53,10 @@ import {
   exportReturnReportToPdf,
   exportCompletedReturnsToExcel,
   exportCompletedRefundsToExcel,
-  exportPendingLabReportsToExcel
+  exportPendingLabReportsToExcel,
+  exportSaturdayWeeklyLabReportToExcel,
+  exportRefundRequestExcelFormatted,
+  exportAllRefundRequestsExcelFormatted
 } from '../services/excelService';
 import { 
   getAllReturnReports, 
@@ -76,7 +79,7 @@ interface ReturnsScreenProps {
   onRefreshDiscrepancies?: () => void;
 }
 
-type ReturnsSubTab = 'editor' | 'pending_lab' | 'refunds' | 'completed_archive';
+type ReturnsSubTab = 'editor' | 'pending_lab' | 'weekly_lab_report' | 'refunds' | 'completed_archive';
 
 export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
   settings,
@@ -92,15 +95,13 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
   // Navigation tab inside Returns
   const [activeSubTab, setActiveSubTab] = useState<ReturnsSubTab>('editor');
 
-  // Helper: Format Return Receipt # as 'new' + Order Number without spaces/delimiters
+  // Helper: Format Return Receipt # as 'return' + Order Number without spaces/delimiters
   const formatReturnReceiptNo = (order: string): string => {
     if (!order) return '';
     const trimmed = order.trim();
     if (!trimmed) return '';
-    if (trimmed.toLowerCase().startsWith('new')) {
-      return trimmed;
-    }
-    return `new${trimmed}`;
+    const clean = trimmed.replace(/^(?:return|new)/i, '').trim();
+    return `return${clean || trimmed}`;
   };
 
   // Active Return Session State (Goods Receipt Under Inspection - استلام تحت الفحص)
@@ -218,9 +219,9 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
       return;
     }
 
-    // 2. Barcode starting with 200 or new200 -> Order Number on shipping order & Return Receipt # (new+orderNo)
-    if (/^(?:new)?200\d*/i.test(clean) && clean.length >= 4) {
-      const cleanOrder = clean.replace(/^new/i, '').trim();
+    // 2. Barcode starting with 200 or return200 / new200 -> Order Number on shipping order & Return Receipt # (return+orderNo)
+    if (/^(?:return|new)?200\d*/i.test(clean) && clean.length >= 4) {
+      const cleanOrder = clean.replace(/^(?:return|new)/i, '').trim();
       const finalOrder = cleanOrder || clean;
       const receipt = formatReturnReceiptNo(finalOrder);
       setOrderNo(finalOrder);
@@ -262,6 +263,12 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
           unitPrice: 0,
           refundTotal: 0,
           condition: 'VALID_FOR_RESTOCK', // Default: صالحة للارتجاع للمستودع
+          inspectionDecision: 'WAREHOUSE',
+          size: 'L',
+          color: 'أبيض',
+          packagingCondition: 'مغلق بتغليف المصنع',
+          reasonText: 'رفض العميل الاستلام',
+          inspectorName: settings.auditorName || 'أحمد عيد',
           isIncludedInRefund: true,
           notes: 'صنف تم مسحه من واقع الفاتورة'
         };
@@ -475,9 +482,9 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
       return;
     }
 
-    // 2. If starts with 200 or new200: route to Order # and Return Receipt # (new+orderNo)
-    if (/^(?:new)?200\d*/i.test(clean) && clean.length >= 4) {
-      const cleanOrder = clean.replace(/^new/i, '').trim();
+    // 2. If starts with 200 or return200 / new200: route to Order # and Return Receipt # (return+orderNo)
+    if (/^(?:return|new)?200\d*/i.test(clean) && clean.length >= 4) {
+      const cleanOrder = clean.replace(/^(?:return|new)/i, '').trim();
       const finalOrder = cleanOrder || clean;
       const receipt = formatReturnReceiptNo(finalOrder);
       setOrderNo(finalOrder);
@@ -520,6 +527,12 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
           unitPrice: 0,
           refundTotal: 0,
           condition: 'VALID_FOR_RESTOCK',
+          inspectionDecision: 'WAREHOUSE',
+          size: 'L',
+          color: 'أبيض',
+          packagingCondition: 'مغلق بتغليف المصنع',
+          reasonText: 'رفض العميل الاستلام',
+          inspectorName: settings.auditorName || 'أحمد عيد',
           isIncludedInRefund: true,
         };
         if (settings.soundEnabled) SoundEffects.playMismatchWarning(settings.soundVolume);
@@ -527,6 +540,23 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
       }
     });
     setManualBarcode('');
+  };
+
+  // Helper: Direct Destination Router between Warehouse and Lab
+  const handleSetDestination = (itemId: string, destination: 'WAREHOUSE' | 'LAB') => {
+    setReturnItems(prev => prev.map(item => {
+      if (item.id === itemId) {
+        const isLab = destination === 'LAB';
+        return {
+          ...item,
+          condition: isLab ? ('TRANSFERRED_TO_LAB' as ReturnItemCondition) : ('VALID_FOR_RESTOCK' as ReturnItemCondition),
+          inspectionDecision: destination,
+          labDecision: isLab ? 'PENDING' : undefined,
+          notes: isLab ? 'صنف محول للمعمل الفني للفحص' : 'صالح لإعادة الإدخال للمستودع'
+        };
+      }
+      return item;
+    }));
   };
 
   // Calculations for current active session
@@ -805,6 +835,21 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                 {pendingLabReports.length}
               </span>
             )}
+          </button>
+
+          <button
+            onClick={() => setActiveSubTab('weekly_lab_report')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all relative ${
+              activeSubTab === 'weekly_lab_report'
+                ? 'bg-blue-600 text-white shadow-md'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800'
+            }`}
+          >
+            <FlaskConical className="w-3.5 h-3.5 text-blue-400" />
+            <span>تقرير المعمل الأسبوعي (سبت)</span>
+            <span className="text-[10px] bg-blue-950 text-blue-300 border border-blue-800 px-1.5 py-0.2 rounded-full font-mono font-bold">
+              {savedReports.reduce((s, r) => s + (r.totalTransferredToLabQty || (r.items || []).filter(i => i.condition === 'TRANSFERRED_TO_LAB').length), 0)}
+            </span>
           </button>
 
           <button
@@ -1149,12 +1194,14 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                   <tr>
                     <th className="p-2.5 text-center w-8">#</th>
                     <th className="p-2.5">الباركود واسم الصنف</th>
+                    <th className="p-2.5 text-center">المقاس / اللون</th>
                     <th className="p-2.5 text-center">كمية الفاتورة</th>
                     <th className="p-2.5 text-center">المرتجع الفعلي</th>
                     <th className="p-2.5 text-center">الممسوح</th>
                     <th className="p-2.5 text-center">سعر الوحدة</th>
                     <th className="p-2.5 text-center">مبلغ الاسترداد</th>
-                    <th className="p-2.5 text-center">حالة الحبة (توجيه الاستلام)</th>
+                    <th className="p-2.5 text-center">الحالة / التوجيه</th>
+                    <th className="p-2.5 text-center">حالة التغليف والسبب</th>
                     <th className="p-2.5">ملاحظات الفحص</th>
                     <th className="p-2.5 text-center w-10">حذف</th>
                   </tr>
@@ -1162,7 +1209,7 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                 <tbody className="divide-y divide-slate-800/60">
                   {filteredItems.length === 0 ? (
                     <tr>
-                      <td colSpan={10} className="p-8 text-center text-slate-500">
+                      <td colSpan={12} className="p-8 text-center text-slate-500">
                         لا توجد أصناف حالياً. ارفع ملف PDF الفاتورة أو امسح الباركود للبدء.
                       </td>
                     </tr>
@@ -1173,6 +1220,24 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                         <td className="p-2.5">
                           <div className="font-bold text-white font-mono">{item.itemCode}</div>
                           <div className="text-[11px] text-slate-400">{item.itemName}</div>
+                        </td>
+                        <td className="p-2.5 text-center">
+                          <div className="flex items-center justify-center gap-1">
+                            <input
+                              type="text"
+                              value={item.size || ''}
+                              placeholder="المقاس (L)"
+                              onChange={(e) => handleUpdateItem(item.id, { size: e.target.value })}
+                              className="w-14 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-[10px] text-center font-bold text-slate-200"
+                            />
+                            <input
+                              type="text"
+                              value={item.color || ''}
+                              placeholder="اللون"
+                              onChange={(e) => handleUpdateItem(item.id, { color: e.target.value })}
+                              className="w-14 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-[10px] text-center text-slate-300"
+                            />
+                          </div>
                         </td>
                         <td className="p-2.5 text-center font-mono">
                           {item.invoicedQty} {item.unit}
@@ -1204,29 +1269,64 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                         <td className="p-2.5 text-center font-mono font-bold text-purple-300">
                           {item.refundTotal.toFixed(2)}
                         </td>
+                        
+                        {/* Status / Destination Routing Column (إلى المستودع أو إلى المعمل) */}
                         <td className="p-2.5 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleToggleCondition(item.id)}
-                            className={`px-3 py-1 rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 mx-auto transition-all shadow-sm ${
-                              item.condition === 'VALID_FOR_RESTOCK'
-                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-700 hover:bg-emerald-900'
-                                : 'bg-amber-950 text-amber-300 border border-amber-600 hover:bg-amber-900'
-                            }`}
-                          >
-                            {item.condition === 'VALID_FOR_RESTOCK' ? (
-                              <>
-                                <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                <span>صالحة للمستودع</span>
-                              </>
-                            ) : (
-                              <>
-                                <FlaskConical className="w-3.5 h-3.5 text-amber-400" />
-                                <span>محولة للمعمل</span>
-                              </>
-                            )}
-                          </button>
+                          <div className="inline-flex rounded-lg border border-slate-700 p-0.5 bg-slate-950 shadow-inner">
+                            <button
+                              type="button"
+                              onClick={() => handleSetDestination(item.id, 'WAREHOUSE')}
+                              className={`px-2.5 py-1 rounded-md text-[11px] font-bold flex items-center gap-1 transition-all ${
+                                item.condition === 'VALID_FOR_RESTOCK'
+                                  ? 'bg-emerald-600 text-white shadow'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                              title="توجيه الصنف إلى المستودع (إعادة للمخزن الصالح)"
+                            >
+                              <Check className="w-3 h-3" />
+                              <span>إلى المستودع</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSetDestination(item.id, 'LAB')}
+                              className={`px-2.5 py-1 rounded-md text-[11px] font-bold flex items-center gap-1 transition-all ${
+                                item.condition === 'TRANSFERRED_TO_LAB'
+                                  ? 'bg-amber-600 text-white shadow'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                              title="توجيه الصنف إلى المعمل (تحويل للمعمل الفني للفحص)"
+                            >
+                              <FlaskConical className="w-3 h-3" />
+                              <span>إلى المعمل</span>
+                            </button>
+                          </div>
                         </td>
+
+                        {/* Packaging condition & Return reason */}
+                        <td className="p-2.5 text-center">
+                          <div className="space-y-1">
+                            <select
+                              value={item.packagingCondition || 'مغلق بتغليف المصنع'}
+                              onChange={(e) => handleUpdateItem(item.id, { packagingCondition: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-[10px] text-slate-300"
+                            >
+                              <option value="مغلق بتغليف المصنع">مغلق بتغليف المصنع</option>
+                              <option value="مفتوح العبوة">مفتوح العبوة</option>
+                              <option value="غير مغلف / تالف التغليف">غير مغلف / تالف التغليف</option>
+                            </select>
+                            <select
+                              value={item.reasonText || 'رفض العميل الاستلام'}
+                              onChange={(e) => handleUpdateItem(item.id, { reasonText: e.target.value })}
+                              className="w-full bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-[10px] text-slate-300"
+                            >
+                              <option value="رفض العميل الاستلام">رفض العميل الاستلام</option>
+                              <option value="عيب صناعة">عيب صناعة</option>
+                              <option value="مقاس غير مناسب">مقاس غير مناسب</option>
+                              <option value="مرتجع عادي">مرتجع عادي</option>
+                            </select>
+                          </div>
+                        </td>
+
                         <td className="p-2.5">
                           <input
                             type="text"
@@ -1308,13 +1408,22 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                 </div>
               </div>
 
-              <button
-                onClick={() => exportPendingLabReportsToExcel(savedReports)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-amber-400 border border-slate-700"
-              >
-                <FileSpreadsheet className="w-4 h-4" />
-                <span>تصدير كشف المعلقات (Excel)</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => exportSaturdayWeeklyLabReportToExcel(savedReports, true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow-sm"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>تصدير تقرير فحص المعمل الأسبوعي (Excel)</span>
+                </button>
+                <button
+                  onClick={() => exportPendingLabReportsToExcel(savedReports)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-amber-400 border border-slate-700"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>تصدير كشف المعلقات</span>
+                </button>
+              </div>
             </div>
 
             {pendingLabReports.length === 0 ? (
@@ -1398,6 +1507,148 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
         </div>
       )}
 
+      {/* 4.5 SUB-TAB: WEEKLY SATURDAY LAB REPORT (تقرير المعمل الأسبوعي كل سبت) */}
+      {activeSubTab === 'weekly_lab_report' && (
+        <div className="space-y-4">
+          <div className="bg-slate-900 border border-blue-900/50 rounded-xl p-4 sm:p-5 shadow-lg space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <FlaskConical className="w-5 h-5 text-blue-400" />
+                <div>
+                  <h2 className="text-sm font-bold text-white">
+                    {isRtl ? 'تقرير إجمالي الحبات المحولة للمعمل للفحص (أسبوعي كل سبت)' : 'Weekly Saturday Quality Lab Transfer Report'}
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    كشف معتمد يطابق تنسيق أوراكل ومجينتو متضمناً رقم تقرير الفحص، المقاس، اللون، التغليف، سبب الإرجاع وبيانات معمل النسيج وفحص الجودة
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => exportSaturdayWeeklyLabReportToExcel(savedReports, true)}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow-md transition-all"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>تصدير تقرير السبت للمعمل (Excel مطابق للمرفق)</span>
+                </button>
+
+                <button
+                  onClick={() => exportSaturdayWeeklyLabReportToExcel(savedReports, false)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>تصدير كافة الحبات (شامل)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Lab Transfer KPIs */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-blue-950/30 border border-blue-900/50 p-3.5 rounded-xl">
+                <div className="text-[11px] text-blue-400 font-semibold">إجمالي الحبات المحولة للمعمل</div>
+                <div className="text-2xl font-black text-blue-300 mt-1">
+                  {savedReports.reduce((s, r) => s + (r.totalTransferredToLabQty || (r.items || []).filter(i => i.condition === 'TRANSFERRED_TO_LAB').reduce((sum, item) => sum + (item.actualReturnedQty || 1), 0)), 0)} <span className="text-xs font-normal text-blue-400/70">حبة</span>
+                </div>
+              </div>
+
+              <div className="bg-slate-950/80 border border-slate-800 p-3.5 rounded-xl">
+                <div className="text-[11px] text-slate-400 font-semibold">عدد طلبات الإرجاع بالمعمل</div>
+                <div className="text-2xl font-black text-white mt-1">
+                  {savedReports.filter(r => (r.items || []).some(i => i.condition === 'TRANSFERRED_TO_LAB')).length}
+                </div>
+              </div>
+
+              <div className="bg-slate-950/80 border border-slate-800 p-3.5 rounded-xl">
+                <div className="text-[11px] text-slate-400 font-semibold">معمل الاستلام المحدد</div>
+                <div className="text-xs font-bold text-amber-300 mt-2 truncate">
+                  معمل النسيج وفحص الجودة المركزي
+                </div>
+              </div>
+
+              <div className="bg-slate-950/80 border border-slate-800 p-3.5 rounded-xl">
+                <div className="text-[11px] text-slate-400 font-semibold">دورة التقرير الرسمية</div>
+                <div className="text-xs font-bold text-emerald-400 mt-2">
+                  أسبوعي (كل سبت) 08:00 ص
+                </div>
+              </div>
+            </div>
+
+            {/* Lab Items Table Preview */}
+            <div className="overflow-x-auto border border-slate-800 rounded-xl">
+              <table className="w-full text-xs text-slate-300 text-right">
+                <thead className="bg-slate-950 text-slate-400 font-bold border-b border-slate-800">
+                  <tr>
+                    <th className="p-2.5 text-center w-12">تقرير #</th>
+                    <th className="p-2.5">تاريخ الفحص</th>
+                    <th className="p-2.5">طلب مجينتو</th>
+                    <th className="p-2.5">أوراكل RMA</th>
+                    <th className="p-2.5">رمز المنتج SKU</th>
+                    <th className="p-2.5">اسم المنتج</th>
+                    <th className="p-2.5 text-center">المقاس</th>
+                    <th className="p-2.5 text-center">اللون</th>
+                    <th className="p-2.5">حالة التغليف</th>
+                    <th className="p-2.5">سبب الإرجاع</th>
+                    <th className="p-2.5 text-center">القرار المبدئي</th>
+                    <th className="p-2.5">فاحص الجودة</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {savedReports.filter(r => (r.items || []).some(i => i.condition === 'TRANSFERRED_TO_LAB')).length === 0 ? (
+                    <tr>
+                      <td colSpan={12} className="p-8 text-center text-slate-500">
+                        لا توجد حبات محولة للمعمل في السجلات حتى الآن. عند توجيه أي صنف للمعمل سيظهر هنا فوراً.
+                      </td>
+                    </tr>
+                  ) : (
+                    savedReports.flatMap((rep, rIdx) => 
+                      (rep.items || [])
+                        .filter(i => i.condition === 'TRANSFERRED_TO_LAB')
+                        .map((item, iIdx) => {
+                          const inspectionNo = String(rIdx * 10 + iIdx + 1).padStart(6, '0');
+                          const cleanOrder = rep.orderNo ? rep.orderNo.replace(/^(?:return|new)/i, '') : '-';
+                          const rmaNo = rep.returnReceiptNo || (rep.orderNo ? `return${cleanOrder}` : '-');
+
+                          return (
+                            <tr key={`${rep.id}-${item.id}`} className="hover:bg-slate-800/40 transition-colors">
+                              <td className="p-2.5 text-center font-mono font-bold text-amber-400">{inspectionNo}</td>
+                              <td className="p-2.5 font-mono text-slate-400">{new Date(rep.createdAt).toLocaleDateString('en-US')}</td>
+                              <td className="p-2.5 font-mono font-bold text-white">{cleanOrder}</td>
+                              <td className="p-2.5 font-mono text-blue-300">{rmaNo}</td>
+                              <td className="p-2.5 font-mono font-bold text-purple-300">{item.itemCode}</td>
+                              <td className="p-2.5 text-slate-200">{item.itemName}</td>
+                              <td className="p-2.5 text-center font-bold text-slate-300">{item.size || 'L'}</td>
+                              <td className="p-2.5 text-center text-slate-400">{item.color || 'أبيض'}</td>
+                              <td className="p-2.5 text-slate-300">{item.packagingCondition || 'مغلق بتغليف المصنع'}</td>
+                              <td className="p-2.5 text-slate-300">{item.reasonText || 'رفض العميل الاستلام'}</td>
+                              <td className="p-2.5 text-center">
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-700">
+                                  تحويل للمعمل الفني
+                                </span>
+                              </td>
+                              <td className="p-2.5 text-slate-300">{item.inspectorName || rep.auditorName || 'أحمد عيد'}</td>
+                            </tr>
+                          );
+                        })
+                    )
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Bottom Lab Transfer Notice */}
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
+              <div>
+                <strong className="text-white">بيانات التحويل للمعمل الفني:</strong> معمل النسيج وفحص الجودة المركزي | طبيعة الاختبار: فحص عيوب التصنيع ومطابقة التغليف والقياسات
+              </div>
+              <div className="text-slate-500 font-mono">
+                جاهز للتوقيع والختم عند التصدير
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 5. SUB-TAB: COMPLETED REFUND REQUESTS (طلبات الاسترداد المالي المعتمدة) */}
       {activeSubTab === 'refunds' && (
         <div className="space-y-4">
@@ -1417,6 +1668,15 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
 
               <div className="flex flex-wrap items-center gap-2">
                 <button
+                  onClick={() => exportAllRefundRequestsExcelFormatted(savedReports)}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white shadow-md transition-all"
+                  title="تصدير ملف إكسيل مخصص بنموذج Refund Request (مطابق للمرفق)"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>تصدير نموذج Refund Request (إكسيل مطابق للمرفق)</span>
+                </button>
+
+                <button
                   onClick={() => setIsEmailModalOpen(true)}
                   className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white shadow-md transition-all"
                 >
@@ -1429,7 +1689,7 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                   className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-xs font-bold text-white shadow-md transition-all"
                 >
                   <FileSpreadsheet className="w-4 h-4" />
-                  <span>تصدير إكسيل الاسترداد المالي (Excel)</span>
+                  <span>تصدير إكسيل الاسترداد المالي (جدول كامل)</span>
                 </button>
               </div>
             </div>
@@ -2118,6 +2378,15 @@ ${methodLines || 'لا توجد طلبات مسجلة'}
               </button>
 
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => exportRefundRequestExcelFormatted(viewingReportModal)}
+                  className="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold flex items-center gap-1 shadow-sm"
+                  title="تصدير نموذج Refund Request المعتمد"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>نموذج Refund Request (Excel)</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => exportReturnReportToExcel(viewingReportModal)}

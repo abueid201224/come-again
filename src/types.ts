@@ -183,6 +183,12 @@ export interface ReturnSessionItem {
   unitPrice: number; // Unit price from invoice or manual entry
   refundTotal: number; // actualReturnedQty * unitPrice
   condition: ReturnItemCondition; // 'VALID_FOR_RESTOCK' (صالحة للمستودع) or 'TRANSFERRED_TO_LAB' (محولة للمعمل)
+  inspectionDecision?: 'WAREHOUSE' | 'LAB'; // قرار الفحص المبدئي: إعادة للمخزن الصالح / تحويل للمعمل الفني
+  size?: string; // المقاس (e.g. XL, M, L, 18R)
+  color?: string; // اللون (e.g. أبيض, أسود)
+  packagingCondition?: string; // حالة التغليف للملابس الداخلية (e.g. مغلق بتغليف المصنع, مفتوح, غير مغلف)
+  reasonText?: string; // سبب الإرجاع (e.g. رفض العميل الاستلام, عيب صناعة, مقاس غير مناسب, مرتجع)
+  inspectorName?: string; // اسم فاحص الجودة
   labDecision?: LabDecision; // 'PENDING' | 'APPROVED_FOR_RESTOCK' | 'REJECTED_SCRAP'
   labNotes?: string;
   reason?: ReturnReason;
@@ -192,7 +198,7 @@ export interface ReturnSessionItem {
 
 export interface ReturnReport {
   id: string;
-  returnReceiptNo: string; // e.g. RET-2026-XXXX (أو rmaNo للتوافق)
+  returnReceiptNo: string; // e.g. return2000178535
   rmaNo?: string;
   originalInvoiceNo: string;
   orderNo?: string;
@@ -209,6 +215,9 @@ export interface ReturnReport {
   totalValidForRestockQty: number;
   totalTransferredToLabQty: number;
   totalRefundAmount: number;
+  labName?: string; // اسم معمل الاستلام
+  labTestType?: string; // طبيعة الاختبار
+  labTransferDate?: string; // تاريخ التحويل
   labNotes?: string;
   labResolvedAt?: string;
   labAuditorName?: string;
