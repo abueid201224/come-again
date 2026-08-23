@@ -16,7 +16,7 @@ export interface ExtractedPdfDocument {
   returnReceiptNo?: string;
   documentType: 'INVOICE' | 'RETURN' | 'RECEIVING' | 'INVENTORY' | 'UNKNOWN';
   customerName?: string;
-  paymentMethod?: 'CASH' | 'BANK_TRANSFER' | 'CARD' | 'CREDIT_BALANCE' | 'COD';
+  paymentMethod?: string; // Flexible payment method string extracted directly from PDF above items table
   date?: string;
   items: ExtractedPdfItem[];
   rawText: string;
@@ -30,6 +30,7 @@ export interface ExtractedPdfItem {
   unit: string;
   quantity: number;
   unitPrice?: number;
+  subtotal?: number; // المجموع الفرعي للصنف بالفاتورة
   totalPrice?: number;
   isHighlighted?: boolean;
   pageNumber: number;
@@ -141,27 +142,82 @@ export async function parsePdfInvoice(
     customerName = matchCust[1].trim().replace(/\n/g, ' ');
   }
 
-  // Detect Payment Method
-  let paymentMethod: 'CASH' | 'BANK_TRANSFER' | 'CARD' | 'CREDIT_BALANCE' | 'COD' = 'CASH';
-  if (/تحويل|بنك|bank|wire|transfer/i.test(fullText)) {
-    paymentMethod = 'BANK_TRANSFER';
-  } else if (/بطاقة|فيزا|مدى|ماستركارد|card|visa|mastercard|mada|pos/i.test(fullText)) {
-    paymentMethod = 'CARD';
-  } else if (/آجل|اجل|محفظة|رصيد|credit|wallet|on account/i.test(fullText)) {
-    paymentMethod = 'CREDIT_BALANCE';
-  } else if (/عند الاستلام|دفع عند|cod|cash on delivery/i.test(fullText)) {
-    paymentMethod = 'COD';
-  } else if (/نقدي|كاش|cash/i.test(fullText)) {
-    paymentMethod = 'CASH';
+  // 4. Identify the boundary where the items table starts (to isolate text above the table)
+  const barcodePattern = /\b(\d{7,14}|SKU-[A-Za-z0-9-_]+|[A-Za-z]{2,5}-\d{3,8})\b/;
+  const numberPattern = /\b(\d+(?:\.\d{1,2})?)\b/g;
+
+  let firstTableLineIndex = detectedLines.findIndex(l => 
+    barcodePattern.test(l.text) || 
+    /(?:الباركود|كود الصنف|الصنف|الوصف|الكمية|السعر|المجموع|المجموع الفرعي|barcode|item code|description|qty|unit price|subtotal|amount)/i.test(l.text)
+  );
+  if (firstTableLineIndex < 0) firstTableLineIndex = Math.min(15, detectedLines.length);
+
+  const headerLines = detectedLines.slice(0, Math.max(1, firstTableLineIndex));
+
+  // Detect Payment Method strictly from the Header section (above the items table)
+  let paymentMethod = '';
+  for (const lineObj of headerLines) {
+    const line = lineObj.text.trim();
+    
+    // Explicit label match (e.g. "طريقة الدفع: تمارا" or "Payment Method: Tabby")
+    const labelMatch = line.match(/(?:طريقة الدفع|وسيلة الدفع|طريقة السداد|نوع الدفع|شروط الدفع|طريقة الشراء|Payment Method|Payment Type|Payment Terms|Payment Mode|Payment)[\s:.\-_/|]*([^\n\r,;|]+)/i);
+    if (labelMatch && labelMatch[1]) {
+      const val = labelMatch[1].replace(/[:\-]/g, '').trim();
+      if (val.length >= 2 && !/^(?:لا يوجد|none|null|undefined)$/i.test(val)) {
+        paymentMethod = val;
+        break;
+      }
+    }
+
+    // Specific payment brand keywords in header
+    if (/تمارا|tamara/i.test(line)) {
+      paymentMethod = 'تمارا (Tamara)';
+      break;
+    } else if (/تابي|tabby/i.test(line)) {
+      paymentMethod = 'تابي (Tabby)';
+      break;
+    } else if (/apple\s*pay|ابل\s*باي|أبل\s*باي/i.test(line)) {
+      paymentMethod = 'أبل باي (Apple Pay)';
+      break;
+    } else if (/stc\s*pay|اس\s*تي\s*سي/i.test(line)) {
+      paymentMethod = 'STC Pay';
+      break;
+    } else if (/مدى|mada/i.test(line)) {
+      paymentMethod = 'بطاقة مدى (Mada)';
+      break;
+    } else if (/فيزا|visa|ماستركارد|mastercard|بطاقة ائتمانية|credit card/i.test(line)) {
+      paymentMethod = 'بطاقة ائتمانية (Credit Card)';
+      break;
+    } else if (/تحويل بنكي|حوالة|bank transfer|wire transfer/i.test(line)) {
+      paymentMethod = 'تحويل بنكي (Bank Transfer)';
+      break;
+    } else if (/دفع عند الاستلام|عند الاستلام|cod|cash on delivery/i.test(line)) {
+      paymentMethod = 'دفع عند الاستلام (COD)';
+      break;
+    } else if (/نقدي|كاش|cash/i.test(line) && !/non-cash/i.test(line)) {
+      paymentMethod = 'نقدي (Cash)';
+      break;
+    } else if (/آجل|اجل|رصيد محفظة|credit balance|wallet/i.test(line)) {
+      paymentMethod = 'رصيد محفظة / آجل (Credit)';
+      break;
+    }
+  }
+
+  // Fallback check on full text if header had no explicit match
+  if (!paymentMethod) {
+    if (/تمارا|tamara/i.test(fullText)) paymentMethod = 'تمارا (Tamara)';
+    else if (/تابي|tabby/i.test(fullText)) paymentMethod = 'تابي (Tabby)';
+    else if (/apple\s*pay|ابل\s*باي/i.test(fullText)) paymentMethod = 'أبل باي (Apple Pay)';
+    else if (/مدى|mada/i.test(fullText)) paymentMethod = 'بطاقة مدى (Mada)';
+    else if (/تحويل|بنك|bank|transfer/i.test(fullText)) paymentMethod = 'تحويل بنكي (Bank Transfer)';
+    else if (/عند الاستلام|cod|cash on delivery/i.test(fullText)) paymentMethod = 'دفع عند الاستلام (COD)';
+    else if (/نقدي|كاش|cash/i.test(fullText)) paymentMethod = 'نقدي (Cash)';
+    else paymentMethod = 'نقدي (Cash)';
   }
 
   // Detect items from table rows - Extract all items completely from the invoice PDF
   const extractedItems: ExtractedPdfItem[] = [];
   let itemCounter = 1;
-
-  // Regex patterns for row detection: Barcode (digits or SKUs) + Name + Qty + Price
-  const barcodePattern = /\b(\d{7,14}|SKU-[A-Za-z0-9-_]+|[A-Za-z]{2,5}-\d{3,8})\b/;
-  const numberPattern = /\b(\d+(?:\.\d{1,2})?)\b/g;
 
   for (const lineObj of detectedLines) {
     const line = lineObj.text;
@@ -170,7 +226,7 @@ export async function parsePdfInvoice(
     if (barcodeMatch) {
       const barcode = barcodeMatch[1];
       
-      // Extract numbers in the line (quantities & prices)
+      // Extract numbers in the line (quantities & prices & subtotals)
       const allNumbers: number[] = [];
       let matchNum: RegExpExecArray | null;
       while ((matchNum = numberPattern.exec(line)) !== null) {
@@ -180,21 +236,44 @@ export async function parsePdfInvoice(
         }
       }
 
-      // Quantity is typically a whole number or the first/second number
       let qty = 1;
       let unitPrice = 0;
-      let totalPrice = 0;
+      let subtotal = 0;
 
       if (allNumbers.length >= 3) {
-        qty = allNumbers[0];
-        unitPrice = allNumbers[1];
-        totalPrice = allNumbers[2];
+        // [Qty, UnitPrice, Subtotal] or [UnitPrice, Qty, Subtotal]
+        const n0 = allNumbers[0];
+        const n1 = allNumbers[1];
+        const n2 = allNumbers[allNumbers.length - 1]; // last number is usually line subtotal
+
+        if (Math.abs((n0 * n1) - n2) < 0.5) {
+          qty = n0;
+          unitPrice = n1;
+          subtotal = n2;
+        } else if (Math.abs((n1 * n2) - n0) < 0.5) {
+          unitPrice = n1;
+          qty = n2;
+          subtotal = n0;
+        } else {
+          // Default heuristic: first integer is quantity, last is subtotal
+          qty = Math.max(1, Math.round(n0));
+          subtotal = n2;
+          unitPrice = qty > 0 ? Number((subtotal / qty).toFixed(2)) : n1;
+        }
       } else if (allNumbers.length === 2) {
-        qty = allNumbers[0];
-        unitPrice = allNumbers[1];
-        totalPrice = qty * unitPrice;
+        // [Qty, Subtotal]
+        qty = Math.max(1, Math.round(allNumbers[0]));
+        subtotal = allNumbers[1];
+        unitPrice = qty > 0 ? Number((subtotal / qty).toFixed(2)) : subtotal;
       } else if (allNumbers.length === 1) {
-        qty = allNumbers[0];
+        qty = Math.max(1, Math.round(allNumbers[0]));
+        subtotal = 0;
+        unitPrice = 0;
+      }
+
+      // If unit price was calculated but subtotal wasn't
+      if (!subtotal && unitPrice > 0 && qty > 0) {
+        subtotal = Number((qty * unitPrice).toFixed(2));
       }
 
       // Item description: Remove barcode and numbers
@@ -223,8 +302,9 @@ export async function parsePdfInvoice(
         itemName: desc,
         unit,
         quantity: Math.max(1, qty),
-        unitPrice: unitPrice || undefined,
-        totalPrice: totalPrice || (unitPrice ? qty * unitPrice : undefined),
+        unitPrice: unitPrice || (subtotal > 0 && qty > 0 ? Number((subtotal / qty).toFixed(2)) : undefined),
+        subtotal: subtotal || (unitPrice > 0 ? Number((qty * unitPrice).toFixed(2)) : undefined),
+        totalPrice: subtotal || (unitPrice ? Number((qty * unitPrice).toFixed(2)) : undefined),
         isHighlighted: isItemHighlighted,
         pageNumber: lineObj.page,
         condition: 'INTACT',

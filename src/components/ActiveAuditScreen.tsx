@@ -41,7 +41,8 @@ import type {
   AppSettings,
   IncompleteInvoiceRecord,
   CompletedInvoiceRecord,
-  LongBarcodePolicy
+  LongBarcodePolicy,
+  DailyAuditSnapshot
 } from '../types';
 import { 
   getInvoiceMasterItems, 
@@ -60,7 +61,13 @@ import {
   getInvoicesAuditSummaryStats,
   saveWrongPicking,
   findItemBelonging,
-  getWrongPickingsByInvoice
+  getWrongPickingsByInvoice,
+  saveDailyAuditSnapshot,
+  getLatestDailyAuditSnapshot,
+  isBatchClosedAndCountersZeroed,
+  resetActiveBatchCountersState,
+  getAllAuditDiscrepancies,
+  getAllWrongPickings
 } from '../services/db';
 import { SoundEffects } from '../services/audio';
 import { translations } from '../services/i18n';
@@ -121,6 +128,8 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
   const [availableInvoices, setAvailableInvoices] = useState<{ invoiceNo: string; orderNo?: string; itemCount: number; totalQty: number }[]>([]);
   const [completedInvoices, setCompletedInvoices] = useState<CompletedInvoiceRecord[]>([]);
   const [incompleteInvoices, setIncompleteInvoices] = useState<IncompleteInvoiceRecord[]>([]);
+  const [isBatchZeroed, setIsBatchZeroed] = useState<boolean>(false);
+  const [latestDailySnapshot, setLatestDailySnapshot] = useState<DailyAuditSnapshot | null>(null);
   
   const [isLoadingInvoice, setIsLoadingInvoice] = useState(false);
   const [activeTabFilter, setActiveTabFilter] = useState<'ALL' | 'PENDING' | 'EXACT' | 'DISCREPANCIES'>('ALL');
@@ -160,14 +169,18 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
 
   const loadAllAuditData = async () => {
     try {
-      const [allInvs, completedList, incompleteList] = await Promise.all([
+      const [allInvs, completedList, incompleteList, zeroedFlag, latestSnapshot] = await Promise.all([
         getAllUniqueInvoices(),
         getAllCompletedInvoices(),
         getAllIncompleteInvoices(),
+        isBatchClosedAndCountersZeroed(),
+        getLatestDailyAuditSnapshot(),
       ]);
       setAvailableInvoices(allInvs);
       setCompletedInvoices(completedList);
       setIncompleteInvoices(incompleteList);
+      setIsBatchZeroed(zeroedFlag);
+      setLatestDailySnapshot(latestSnapshot);
     } catch (err) {
       console.error('Failed to load audit data', err);
     }
@@ -199,6 +212,12 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
   const lockInvoiceSession = async (invoiceNoInput: string, forceReopen = false) => {
     const cleanInput = invoiceNoInput.trim();
     if (!cleanInput) return;
+
+    // Reset previous batch counters record when starting a fresh scan
+    if (isBatchZeroed) {
+      await resetActiveBatchCountersState();
+      setIsBatchZeroed(false);
+    }
 
     setIsLoadingInvoice(true);
     try {
@@ -668,6 +687,41 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
     // Delete any pending incomplete record since it's now completed
     await deleteIncompleteInvoice(session.invoiceNo);
 
+    // Check if this was the last invoice of the batch
+    const [allInvs, updatedCompleted] = await Promise.all([
+      getAllUniqueInvoices(),
+      getAllCompletedInvoices(),
+    ]);
+
+    const isLastInvoiceOfBatch = allInvs.length > 0 && updatedCompleted.length >= allInvs.length;
+    if (isLastInvoiceOfBatch) {
+      const [currentDiscrepancies, currentWrongs] = await Promise.all([
+        getAllAuditDiscrepancies(),
+        getAllWrongPickings(),
+      ]);
+
+      const snapshot: DailyAuditSnapshot = {
+        id: `snapshot-${Date.now()}`,
+        date: new Date().toISOString().slice(0, 10),
+        closedAt: auditedAt,
+        totalInvoices: allInvs.length,
+        completedInvoices: updatedCompleted.length,
+        totalItems: updatedCompleted.reduce((acc, c) => acc + (c.totalItems || 0), 0),
+        totalRequiredQty: updatedCompleted.reduce((acc, c) => acc + (c.totalQty || 0), 0),
+        totalScannedQty: updatedCompleted.reduce((acc, c) => acc + (c.totalQty || 0), 0),
+        totalDiscrepancies: currentDiscrepancies.length,
+        totalWrongPickings: currentWrongs.length,
+        auditorName: settings.auditorName || 'أحمد حمادة',
+        auditorId: settings.auditorId || 'AUD-101',
+        notes: 'تم إقفال آخر فاتورة وتسجيل قيم عدادات اليوم وتصفير عدادات التشغيل بنجاح لحين مزامنة جديدة.'
+      };
+
+      await saveDailyAuditSnapshot(snapshot);
+      setIsBatchZeroed(true);
+      setLatestDailySnapshot(snapshot);
+      if (settings.soundEnabled) SoundEffects.playExactComplete(settings.soundVolume);
+    }
+
     // Clear active session
     await saveActiveSession(null);
     setActiveSession(null);
@@ -848,6 +902,88 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
 
   return (
     <div className={`space-y-4 ${isRtl ? 'rtl text-right' : 'ltr text-left'}`} dir={isRtl ? 'rtl' : 'ltr'}>
+      {/* 🌟 0. BATCH CLOSED & DAILY COUNTERS SNAPSHOT BANNER */}
+      {isBatchZeroed && (
+        <div className="bg-gradient-to-r from-emerald-950/90 via-slate-900 to-indigo-950/90 border-2 border-emerald-500/70 rounded-2xl p-4 sm:p-5 shadow-2xl space-y-3.5 animate-in fade-in zoom-in-95 duration-200">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-emerald-800/40">
+            <div className="flex items-center gap-3">
+              <div className="p-3 bg-emerald-500/20 text-emerald-300 rounded-xl border border-emerald-400/40 shadow-inner">
+                <CheckCircle2 className="w-6 h-6 text-emerald-400" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 text-[10px] font-black px-2.5 py-0.5 rounded-full">
+                    {isRtl ? 'تم إقفال آخر فاتورة بنجاح' : 'Final Invoice Closed'}
+                  </span>
+                  <span className="text-xs text-slate-400 font-mono">
+                    {latestDailySnapshot?.closedAt ? new Date(latestDailySnapshot.closedAt).toLocaleTimeString(isRtl ? 'ar-SA' : 'en-US') : ''}
+                  </span>
+                </div>
+                <h2 className="text-base font-black text-white mt-1">
+                  {isRtl ? 'تم تسجيل قيم عدادات اليوم وتصفير عدادات الفواتير والأخطاء لحين بدء مزامنة جديدة' : 'Today Counters Recorded & Batch Reset Until Next Sync'}
+                </h2>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onOpenSyncModal}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-lg transition-all"
+              >
+                <Sparkles className="w-4 h-4 text-emerald-200" />
+                <span>{isRtl ? 'بدء مزامنة جديدة (Excel/CSV)' : 'New Manifest Sync'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  await resetActiveBatchCountersState();
+                  setIsBatchZeroed(false);
+                  await loadAllAuditData();
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold transition-all"
+                title="تصفير السجل السابق وبدء دورة مسح جديدة"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+                <span>{isRtl ? 'تصفير السجل وبدء مسح جديد' : 'Clear Log & Start Fresh'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Snapshot KPI Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+            <div className="bg-slate-950/70 border border-slate-800 p-2.5 rounded-xl">
+              <span className="text-[11px] text-slate-400 block">{isRtl ? 'إجمالي الفواتير المنجزة' : 'Total Completed Invoices'}</span>
+              <span className="text-base font-black font-mono text-emerald-400">
+                {latestDailySnapshot?.completedInvoices ?? completedInvoices.length} {isRtl ? 'فاتورة' : 'inv'}
+              </span>
+            </div>
+
+            <div className="bg-slate-950/70 border border-slate-800 p-2.5 rounded-xl">
+              <span className="text-[11px] text-slate-400 block">{isRtl ? 'إجمالي القطع المفحوصة' : 'Scanned Units'}</span>
+              <span className="text-base font-black font-mono text-blue-400">
+                {latestDailySnapshot?.totalScannedQty ?? 0} {isRtl ? 'قطعة' : 'units'}
+              </span>
+            </div>
+
+            <div className="bg-slate-950/70 border border-slate-800 p-2.5 rounded-xl">
+              <span className="text-[11px] text-slate-400 block">{isRtl ? 'الأخطاء والنواقص المسجلة' : 'Recorded Errors'}</span>
+              <span className="text-base font-black font-mono text-amber-400">
+                {latestDailySnapshot?.totalDiscrepancies ?? 0} {isRtl ? 'حالة' : 'errors'}
+              </span>
+            </div>
+
+            <div className="bg-slate-950/70 border border-slate-800 p-2.5 rounded-xl">
+              <span className="text-[11px] text-slate-400 block">{isRtl ? 'المراجع المعتمد' : 'Certified Auditor'}</span>
+              <span className="text-xs font-bold text-white truncate block mt-0.5">
+                {latestDailySnapshot?.auditorName || settings.auditorName || 'أحمد حمادة'}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 🌟 1. GLOBAL AUDIT PROGRESS & KPI COUNTER BAR */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 bg-slate-900 border border-slate-800 rounded-xl p-3 shadow-md">
         {/* Total Invoices */}
@@ -857,7 +993,9 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
           </div>
           <div>
             <span className="text-[11px] text-slate-400 block font-medium">{isRtl ? 'إجمالي الفواتير' : 'Total Invoices'}</span>
-            <div className="text-base sm:text-lg font-black font-mono text-white">{availableInvoices.length}</div>
+            <div className="text-base sm:text-lg font-black font-mono text-white">
+              {isBatchZeroed ? 0 : availableInvoices.length}
+            </div>
           </div>
         </div>
 
@@ -869,7 +1007,7 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
           <div>
             <span className="text-[11px] text-emerald-400 block font-medium">{isRtl ? 'فواتير مكتملة ومقفلة' : 'Completed Invoices'}</span>
             <div className="text-base sm:text-lg font-black font-mono text-emerald-300">
-              {completedInvoices.length} <span className="text-xs text-slate-400 font-normal">/ {availableInvoices.length}</span>
+              {isBatchZeroed ? 0 : completedInvoices.length} <span className="text-xs text-slate-400 font-normal">/ {isBatchZeroed ? 0 : availableInvoices.length}</span>
             </div>
           </div>
         </div>
@@ -886,11 +1024,11 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
             <div>
               <span className="text-[11px] text-amber-400 block font-medium">{isRtl ? 'فواتير مرحلة للاستكمال' : 'Incomplete Queue'}</span>
               <div className="text-base sm:text-lg font-black font-mono text-amber-300">
-                {incompleteInvoices.length} <span className="text-xs text-slate-400 font-normal">{isRtl ? 'ناقصة' : 'pending'}</span>
+                {isBatchZeroed ? 0 : incompleteInvoices.length} <span className="text-xs text-slate-400 font-normal">{isRtl ? 'ناقصة' : 'pending'}</span>
               </div>
             </div>
           </div>
-          {incompleteInvoices.length > 0 && (
+          {!isBatchZeroed && incompleteInvoices.length > 0 && (
             <span className="text-[10px] bg-amber-500 text-slate-950 font-bold px-1.5 py-0.5 rounded-full shrink-0">
               {isRtl ? 'عرض' : 'View'}
             </span>
@@ -905,7 +1043,7 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
           <div>
             <span className="text-[11px] text-slate-400 block font-medium">{isRtl ? 'فواتير متبقية' : 'Remaining Invoices'}</span>
             <div className="text-base sm:text-lg font-black font-mono text-slate-200">
-              {Math.max(0, availableInvoices.length - completedInvoices.length)}
+              {isBatchZeroed ? 0 : Math.max(0, availableInvoices.length - completedInvoices.length)}
             </div>
           </div>
         </div>

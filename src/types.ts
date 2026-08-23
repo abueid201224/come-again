@@ -169,7 +169,7 @@ export interface PackagingGroupRule {
 export type ReturnItemCondition = 'VALID_FOR_RESTOCK' | 'TRANSFERRED_TO_LAB' | 'INTACT' | 'DAMAGED';
 export type LabDecision = 'PENDING' | 'APPROVED_FOR_RESTOCK' | 'REJECTED_SCRAP';
 export type ReturnReason = 'CUSTOMER_REFUSED' | 'DEFECTIVE' | 'EXPIRED_NEAR' | 'WRONG_DELIVERY' | 'OVER_ORDERED' | 'OTHER';
-export type PaymentMethod = 'CASH' | 'BANK_TRANSFER' | 'CARD' | 'CREDIT_BALANCE' | 'COD';
+export type PaymentMethod = 'CASH' | 'BANK_TRANSFER' | 'CARD' | 'CREDIT_BALANCE' | 'COD' | string;
 export type ReturnReportStatus = 'COMPLETED' | 'PENDING_LAB' | 'DRAFT' | 'CANCELLED';
 
 export interface ReturnSessionItem {
@@ -177,11 +177,14 @@ export interface ReturnSessionItem {
   itemCode: string;
   itemName: string;
   unit: string;
+  invoiceNo?: string; // Original invoice number for multi-invoice batches
+  sourceFile?: string; // Name of uploaded source PDF/Excel
   invoicedQty: number; // Quantity on original customer invoice
+  subtotal?: number; // المجموع الفرعي للصنف من الفاتورة
   actualReturnedQty: number; // Editable actual return qty received under inspection
   scannedQty: number; // Real-time verified physical barcode scans
-  unitPrice: number; // Unit price from invoice or manual entry
-  refundTotal: number; // actualReturnedQty * unitPrice
+  unitPrice: number; // Unit price from invoice (subtotal / invoicedQty) or manual entry
+  refundTotal: number; // actualReturnedQty * (subtotal / invoicedQty)
   condition: ReturnItemCondition; // 'VALID_FOR_RESTOCK' (صالحة للمستودع) or 'TRANSFERRED_TO_LAB' (محولة للمعمل)
   inspectionDecision?: 'WAREHOUSE' | 'LAB'; // قرار الفحص المبدئي: إعادة للمخزن الصالح / تحويل للمعمل الفني
   size?: string; // المقاس (e.g. XL, M, L, 18R)
@@ -194,6 +197,22 @@ export interface ReturnSessionItem {
   reason?: ReturnReason;
   notes?: string;
   isIncludedInRefund: boolean; // toggle to include/exclude
+}
+
+export interface DailyAuditSnapshot {
+  id: string;
+  date: string; // e.g. "2026-08-23"
+  closedAt: string;
+  totalInvoices: number;
+  completedInvoices: number;
+  totalItems: number;
+  totalRequiredQty: number;
+  totalScannedQty: number;
+  totalDiscrepancies: number;
+  totalWrongPickings: number;
+  auditorName?: string;
+  auditorId?: string;
+  notes?: string;
 }
 
 export interface ReturnReport {

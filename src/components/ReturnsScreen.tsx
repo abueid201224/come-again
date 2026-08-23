@@ -32,7 +32,13 @@ import {
   AlertCircle,
   Truck,
   Zap,
-  CheckCheck
+  CheckCheck,
+  Files,
+  FolderPlus,
+  ListFilter,
+  SlidersHorizontal,
+  FileUp,
+  List
 } from 'lucide-react';
 import type { 
   AppSettings, 
@@ -121,7 +127,10 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
   // Filtering & Scanning State
   const [filterQuery, setFilterQuery] = useState('');
   const [selectedConditionFilter, setSelectedConditionFilter] = useState<string>('ALL');
+  const [scanStatusFilter, setScanStatusFilter] = useState<'ALL' | 'SCANNED_FULL' | 'SCANNED_PARTIAL' | 'NOT_SCANNED' | 'OVER_SCANNED' | 'VALID_FOR_RESTOCK' | 'TRANSFERRED_TO_LAB'>('ALL');
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
+  const [pdfBatchProgress, setPdfBatchProgress] = useState<{ current: number; total: number; filename: string } | null>(null);
+  const [uploadedBatchFiles, setUploadedBatchFiles] = useState<{ name: string; invoiceNo?: string; count: number; totalQty: number }[]>([]);
   const [manualBarcode, setManualBarcode] = useState('');
 
   // Database Saved Reports
@@ -238,16 +247,27 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
 
     // 3. Otherwise: Process as Item Barcode
     setReturnItems(prev => {
-      const idx = prev.findIndex(i => i.itemCode.toLowerCase() === clean.toLowerCase());
+      // Prioritize items where scannedQty < invoicedQty for smooth multi-invoice workflow
+      const pendingIdx = prev.findIndex(i => i.itemCode.toLowerCase() === clean.toLowerCase() && (i.scannedQty || 0) < i.invoicedQty);
+      const idx = pendingIdx !== -1 ? pendingIdx : prev.findIndex(i => i.itemCode.toLowerCase() === clean.toLowerCase());
+
       if (idx !== -1) {
         const updated = [...prev];
         const current = updated[idx];
         const nextScanned = current.scannedQty + 1;
+        const nextReturned = Math.max(current.actualReturnedQty, nextScanned);
+        const invoicedQty = Number(current.invoicedQty) || 1;
+        const itemSubtotal = current.subtotal || (invoicedQty * (current.unitPrice || 0));
+        const unitRate = invoicedQty > 0 ? (itemSubtotal / invoicedQty) : (current.unitPrice || 0);
+        const computedRefund = (nextReturned === invoicedQty && itemSubtotal > 0)
+          ? itemSubtotal
+          : Number((nextReturned * unitRate).toFixed(2));
+
         updated[idx] = {
           ...current,
           scannedQty: nextScanned,
-          actualReturnedQty: Math.max(current.actualReturnedQty, nextScanned),
-          refundTotal: Math.max(current.actualReturnedQty, nextScanned) * (current.unitPrice || 0)
+          actualReturnedQty: nextReturned,
+          refundTotal: computedRefund
         };
         if (settings.soundEnabled) SoundEffects.playScanMatch(settings.soundVolume);
         return updated;
@@ -258,6 +278,7 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
           itemName: `صنف ممسوح ${clean}`,
           unit: 'PCS',
           invoicedQty: 1,
+          subtotal: 0,
           actualReturnedQty: 1,
           scannedQty: 1,
           unitPrice: 0,
@@ -283,11 +304,18 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
     setIsFullInvoiceReturn(enable);
     setReturnItems(prev => prev.map(item => {
       const targetQty = enable ? item.invoicedQty : item.scannedQty;
+      const invoicedQty = Number(item.invoicedQty) || 1;
+      const itemSubtotal = item.subtotal || (invoicedQty * (item.unitPrice || 0));
+      const unitRate = invoicedQty > 0 ? (itemSubtotal / invoicedQty) : (item.unitPrice || 0);
+      const computedRefund = (targetQty === invoicedQty && itemSubtotal > 0)
+        ? itemSubtotal
+        : Number((targetQty * unitRate).toFixed(2));
+
       return {
         ...item,
         actualReturnedQty: targetQty,
         scannedQty: enable ? item.invoicedQty : item.scannedQty,
-        refundTotal: targetQty * (item.unitPrice || 0),
+        refundTotal: computedRefund,
       };
     }));
     if (enable) {
@@ -338,56 +366,138 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
     }
   };
 
-  // Handle PDF Smart Extraction (Full invoice extraction without highlight filtering)
-  const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Handle PDF Smart Extraction (Supports single and multiple batch PDFs + append mode)
+  const handlePdfUpload = async (e: React.ChangeEvent<HTMLInputElement>, appendMode: boolean = false) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files: File[] = Array.from(fileList);
 
     setIsLoadingPdf(true);
+    const newItems: ReturnSessionItem[] = [];
+    const docNumbers: string[] = [];
+    const orderNumbers: string[] = [];
+    const customerNames: string[] = [];
+    const paymentMethods: string[] = [];
+    const fileSummaries: { name: string; invoiceNo?: string; count: number; totalQty: number }[] = [];
+
     try {
-      const extracted = await parsePdfInvoice(file, false);
-      if (extracted.documentNo) setOriginalInvoiceNo(extracted.documentNo);
-      if (extracted.orderNo) {
-        const cleanOrder = extracted.orderNo.replace(/^new/i, '').trim();
-        const finalOrder = cleanOrder || extracted.orderNo;
-        setOrderNo(finalOrder);
-        setReturnReceiptNo(extracted.returnReceiptNo || formatReturnReceiptNo(finalOrder));
-      } else if (extracted.returnReceiptNo) {
-        setReturnReceiptNo(extracted.returnReceiptNo);
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        setPdfBatchProgress({ current: i + 1, total: files.length, filename: file.name });
+        
+        try {
+          const extracted = await parsePdfInvoice(file, false);
+          if (extracted.documentNo && !docNumbers.includes(extracted.documentNo)) {
+            docNumbers.push(extracted.documentNo);
+          }
+          if (extracted.orderNo) {
+            const cleanOrder = extracted.orderNo.replace(/^(?:return|new)/i, '').trim();
+            if (cleanOrder && !orderNumbers.includes(cleanOrder)) {
+              orderNumbers.push(cleanOrder);
+            }
+          }
+          if (extracted.customerName && !customerNames.includes(extracted.customerName)) {
+            customerNames.push(extracted.customerName);
+          }
+          if (extracted.paymentMethod && !paymentMethods.includes(extracted.paymentMethod)) {
+            paymentMethods.push(extracted.paymentMethod);
+          }
+
+          let fileTotalQty = 0;
+          const itemsFromFile: ReturnSessionItem[] = extracted.items.map((item, itemIdx) => {
+            const itemSubtotal = item.subtotal || item.totalPrice || (item.unitPrice ? item.quantity * item.unitPrice : 0);
+            const invoicedQuantity = item.quantity || 1;
+            fileTotalQty += invoicedQuantity;
+            const computedUnitPrice = (invoicedQuantity > 0 && itemSubtotal > 0)
+              ? Number((itemSubtotal / invoicedQuantity).toFixed(2))
+              : (item.unitPrice || 0);
+
+            const initialQty = isFullInvoiceReturn ? invoicedQuantity : 0;
+            const computedRefund = (initialQty === invoicedQuantity && itemSubtotal > 0)
+              ? itemSubtotal
+              : Number((initialQty * (itemSubtotal > 0 ? itemSubtotal / invoicedQuantity : computedUnitPrice)).toFixed(2));
+
+            return {
+              id: item.id || `ret-pdf-${Date.now()}-${i}-${itemIdx}-${Math.random().toString(36).substring(2, 7)}`,
+              itemCode: item.itemCode,
+              itemName: item.itemName,
+              unit: item.unit || 'PCS',
+              invoiceNo: extracted.documentNo || undefined,
+              sourceFile: file.name,
+              invoicedQty: invoicedQuantity,
+              subtotal: itemSubtotal,
+              actualReturnedQty: initialQty,
+              scannedQty: initialQty,
+              unitPrice: computedUnitPrice,
+              refundTotal: computedRefund,
+              condition: 'VALID_FOR_RESTOCK',
+              inspectionDecision: 'WAREHOUSE',
+              size: 'L',
+              color: 'أبيض',
+              packagingCondition: 'مغلق بتغليف المصنع',
+              reasonText: 'رفض العميل الاستلام',
+              inspectorName: settings.auditorName || 'أحمد عيد',
+              isIncludedInRefund: true,
+              notes: '',
+            };
+          });
+
+          newItems.push(...itemsFromFile);
+          fileSummaries.push({
+            name: file.name,
+            invoiceNo: extracted.documentNo,
+            count: itemsFromFile.length,
+            totalQty: fileTotalQty,
+          });
+        } catch (fileErr) {
+          console.error(`Error parsing ${file.name}:`, fileErr);
+        }
       }
-      if (extracted.customerName) setCustomerName(extracted.customerName);
-      if (extracted.paymentMethod) setPaymentMethod(extracted.paymentMethod);
 
-      const items: ReturnSessionItem[] = extracted.items.map(item => {
-        const initialQty = isFullInvoiceReturn ? item.quantity : 0;
-        return {
-          id: item.id || `ret-${Math.random()}`,
-          itemCode: item.itemCode,
-          itemName: item.itemName,
-          unit: item.unit || 'PCS',
-          invoicedQty: item.quantity,
-          actualReturnedQty: initialQty,
-          scannedQty: initialQty,
-          unitPrice: item.unitPrice || 0,
-          refundTotal: initialQty * (item.unitPrice || 0),
-          condition: 'VALID_FOR_RESTOCK', // Default under inspection: صالحة للمستودع
-          isIncludedInRefund: true,
-          notes: '',
-        };
-      });
+      if (newItems.length === 0) {
+        alert(isRtl ? 'لم يتم العثور على جداول أصناف في الملفات المحددة.' : 'No items found in selected PDF files.');
+        return;
+      }
 
-      setReturnItems(items);
+      // Update Session Metadata & State
+      if (appendMode) {
+        setReturnItems(prev => [...prev, ...newItems]);
+        setUploadedBatchFiles(prev => [...prev, ...fileSummaries]);
+        if (docNumbers.length > 0) {
+          const currentInvoices = originalInvoiceNo ? originalInvoiceNo.split(/[,،]\s*/).map(s => s.trim()) : [];
+          const mergedInvs = Array.from(new Set([...currentInvoices, ...docNumbers]));
+          setOriginalInvoiceNo(mergedInvs.join(', '));
+        }
+      } else {
+        setReturnItems(newItems);
+        setUploadedBatchFiles(fileSummaries);
+        if (docNumbers.length > 0) {
+          setOriginalInvoiceNo(docNumbers.join(', '));
+        }
+        if (orderNumbers.length > 0) {
+          setOrderNo(orderNumbers.join(', '));
+          setReturnReceiptNo(formatReturnReceiptNo(orderNumbers[0]));
+        }
+        if (customerNames.length > 0) {
+          setCustomerName(customerNames.join(' / '));
+        }
+        if (paymentMethods.length > 0) {
+          setPaymentMethod(paymentMethods.join(' / '));
+        }
+      }
+
       if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
       setScanNotification({
         message: isRtl 
-          ? `✅ تم استخلاص الفاتورة كاملة بنجاح (${items.length} صنف). ابدأ المسح للتحقق أو اختر ارتجاع كامل.` 
-          : `✅ Extracted full invoice (${items.length} items). Scan to verify or select full return.`,
+          ? `✅ تم استخلاص ${files.length} ملف/ملفات PDF بنجاح (إجمالي ${newItems.length} صنف). ابدأ المسح للتحقق والفلترة.` 
+          : `✅ Extracted ${files.length} PDF file(s) successfully (${newItems.length} items total). Ready for scan & filter.`,
         type: 'INVOICE'
       });
     } catch (err) {
-      alert(`خطأ في قراءة ملف PDF: ${(err as Error).message}`);
+      alert(`خطأ في قراءة ملفات PDF: ${(err as Error).message}`);
     } finally {
       setIsLoadingPdf(false);
+      setPdfBatchProgress(null);
       e.target.value = '';
     }
   };
@@ -434,12 +544,35 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
     }
   };
 
-  // Update item field directly
+  // Update item field directly with subtotal-derived unit price and partial return equations
   const handleUpdateItem = (id: string, updates: Partial<ReturnSessionItem>) => {
     setReturnItems(prev => prev.map(item => {
       if (item.id === id) {
         const merged = { ...item, ...updates };
-        merged.refundTotal = (Number(merged.actualReturnedQty) || 0) * (Number(merged.unitPrice) || 0);
+        const invoicedQty = Number(merged.invoicedQty) || 1;
+        const actualQty = Number(merged.actualReturnedQty) || 0;
+
+        if (updates.subtotal !== undefined) {
+          const sub = Number(updates.subtotal) || 0;
+          merged.subtotal = sub;
+          merged.unitPrice = invoicedQty > 0 ? Number((sub / invoicedQty).toFixed(2)) : 0;
+        } else if (updates.unitPrice !== undefined) {
+          const up = Number(updates.unitPrice) || 0;
+          merged.unitPrice = up;
+          if (merged.subtotal === undefined || merged.subtotal === 0) {
+            merged.subtotal = Number((invoicedQty * up).toFixed(2));
+          }
+        }
+
+        const itemSubtotal = merged.subtotal || (invoicedQty * (merged.unitPrice || 0));
+        const unitRate = invoicedQty > 0 ? (itemSubtotal / invoicedQty) : (merged.unitPrice || 0);
+
+        if (actualQty === invoicedQty && itemSubtotal > 0) {
+          merged.refundTotal = itemSubtotal;
+        } else {
+          merged.refundTotal = Number((actualQty * unitRate).toFixed(2));
+        }
+
         return merged;
       }
       return item;
@@ -711,13 +844,60 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
     return savedReports.filter(r => r.status === 'COMPLETED');
   }, [savedReports]);
 
-  const filteredItems = returnItems.filter(item => {
-    const matchQ = !filterQuery || 
-      item.itemCode.toLowerCase().includes(filterQuery.toLowerCase()) || 
-      item.itemName.toLowerCase().includes(filterQuery.toLowerCase());
-    const matchCond = selectedConditionFilter === 'ALL' || item.condition === selectedConditionFilter;
-    return matchQ && matchCond;
-  });
+  // Scan status filter stats for post-scan filtering
+  const scanFilterStats = useMemo(() => {
+    const all = returnItems.length;
+    const scannedFull = returnItems.filter(i => (i.scannedQty || 0) >= i.invoicedQty && i.invoicedQty > 0).length;
+    const scannedPartial = returnItems.filter(i => (i.scannedQty || 0) > 0 && (i.scannedQty || 0) < i.invoicedQty).length;
+    const notScanned = returnItems.filter(i => (i.scannedQty || 0) === 0).length;
+    const overScanned = returnItems.filter(i => (i.scannedQty || 0) > i.invoicedQty).length;
+    const validRestock = returnItems.filter(i => i.condition === 'VALID_FOR_RESTOCK').length;
+    const toLab = returnItems.filter(i => i.condition === 'TRANSFERRED_TO_LAB').length;
+
+    return {
+      all,
+      scannedFull,
+      scannedPartial,
+      notScanned,
+      overScanned,
+      validRestock,
+      toLab
+    };
+  }, [returnItems]);
+
+  const filteredItems = useMemo(() => {
+    return returnItems.filter(item => {
+      // 1. Search Query Filter (Code, Name, Invoice Number, Source File)
+      const q = filterQuery.trim().toLowerCase();
+      const matchQ = !q || 
+        item.itemCode.toLowerCase().includes(q) || 
+        item.itemName.toLowerCase().includes(q) ||
+        (item.invoiceNo && item.invoiceNo.toLowerCase().includes(q)) ||
+        (item.sourceFile && item.sourceFile.toLowerCase().includes(q));
+
+      // 2. Scan Status Filter
+      let matchScanStatus = true;
+      const sQty = item.scannedQty || 0;
+      if (scanStatusFilter === 'SCANNED_FULL') {
+        matchScanStatus = (sQty >= item.invoicedQty && item.invoicedQty > 0);
+      } else if (scanStatusFilter === 'SCANNED_PARTIAL') {
+        matchScanStatus = (sQty > 0 && sQty < item.invoicedQty);
+      } else if (scanStatusFilter === 'NOT_SCANNED') {
+        matchScanStatus = (sQty === 0);
+      } else if (scanStatusFilter === 'OVER_SCANNED') {
+        matchScanStatus = (sQty > item.invoicedQty);
+      } else if (scanStatusFilter === 'VALID_FOR_RESTOCK') {
+        matchScanStatus = (item.condition === 'VALID_FOR_RESTOCK');
+      } else if (scanStatusFilter === 'TRANSFERRED_TO_LAB') {
+        matchScanStatus = (item.condition === 'TRANSFERRED_TO_LAB');
+      }
+
+      // 3. Condition Filter (Dropdown)
+      const matchCond = selectedConditionFilter === 'ALL' || item.condition === selectedConditionFilter;
+
+      return matchQ && matchScanStatus && matchCond;
+    });
+  }, [returnItems, filterQuery, scanStatusFilter, selectedConditionFilter]);
 
   return (
     <div className="space-y-4">
@@ -1052,37 +1232,69 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-purple-400 mb-1">
-                  {isRtl ? 'طريقة الدفع الأصلية *' : 'Payment Method *'}
-                </label>
-                <select
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-semibold text-purple-400">
+                    {isRtl ? 'طريقة الدفع الأصلية *' : 'Payment Method *'}
+                  </label>
+                  {paymentMethod && (
+                    <span className="text-[10px] bg-purple-950 text-purple-300 border border-purple-800/80 px-1.5 py-0.2 rounded font-bold">
+                      {isRtl ? 'مستخلصة من الفاتورة' : 'Extracted from PDF'}
+                    </span>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  list="payment-methods-suggestions"
                   value={paymentMethod}
-                  onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}
-                  className="w-full bg-slate-950 border border-purple-900/60 rounded-lg px-2.5 py-2 text-xs text-purple-200 font-bold focus:outline-none"
-                >
-                  <option value="CASH">نقدي (Cash)</option>
-                  <option value="BANK_TRANSFER">تحويل بنكي (Bank Transfer)</option>
-                  <option value="CARD">بطاقة مدى / ائتمان (Card)</option>
-                  <option value="CREDIT_BALANCE">رصيد آجل / محفظة (Credit)</option>
-                  <option value="COD">دفع عند الاستلام (COD)</option>
-                </select>
+                  onChange={(e) => setPaymentMethod(e.target.value)}
+                  placeholder="تمارا / تابي / مدى / بطاقة / نقدي / تحويل..."
+                  className="w-full bg-slate-950 border border-purple-900/60 rounded-lg px-3 py-2 text-xs text-purple-200 font-bold focus:outline-none focus:border-purple-500"
+                />
+                <datalist id="payment-methods-suggestions">
+                  <option value="تمارا (Tamara)" />
+                  <option value="تابي (Tabby)" />
+                  <option value="بطاقة مدى / ائتمان (Mada / Credit Card)" />
+                  <option value="Apple Pay" />
+                  <option value="تحويل بنكي (Bank Transfer)" />
+                  <option value="نقدي (Cash)" />
+                  <option value="دفع عند الاستلام (COD)" />
+                  <option value="رصيد محفظة / آجل (Credit Balance)" />
+                </datalist>
               </div>
             </div>
 
-            {/* Smart Import Buttons */}
+            {/* Smart Import Buttons & Multi-PDF Batch Support */}
             <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
-              <div className="flex items-center gap-2">
-                <label className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-bold cursor-pointer transition-all shadow-md">
-                  <Upload className="w-4 h-4" />
-                  <span>{isLoadingPdf ? 'جاري قراءة الفاتورة...' : 'استيراد ومسح PDF الفاتورة'}</span>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Multi-PDF Batch Upload (Replaces session or starts fresh) */}
+                <label className="flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white rounded-lg text-xs font-bold cursor-pointer transition-all shadow-md">
+                  <Files className="w-4 h-4" />
+                  <span>{isLoadingPdf ? 'جاري قراءة الملفات...' : 'استيراد PDF مجمّع (ملف أو عدة ملفات)'}</span>
                   <input
                     type="file"
                     accept=".pdf"
-                    onChange={handlePdfUpload}
+                    multiple
+                    onChange={(e) => handlePdfUpload(e, false)}
                     disabled={isLoadingPdf}
                     className="hidden"
                   />
                 </label>
+
+                {/* Append Additional PDFs to Current Session */}
+                {returnItems.length > 0 && (
+                  <label className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-sm">
+                    <FolderPlus className="w-4 h-4 text-amber-400" />
+                    <span>إضافة ملفات PDF أخرى (+ دمج)</span>
+                    <input
+                      type="file"
+                      accept=".pdf"
+                      multiple
+                      onChange={(e) => handlePdfUpload(e, true)}
+                      disabled={isLoadingPdf}
+                      className="hidden"
+                    />
+                  </label>
+                )}
 
                 <label className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold cursor-pointer">
                   <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
@@ -1100,6 +1312,70 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                 المراجع المسؤول: <span className="text-white font-bold">{settings.auditorName || 'أحمد حمادة'}</span> ({settings.auditorId || 'AUD-101'})
               </div>
             </div>
+
+            {/* Batch Progress Bar during extraction */}
+            {pdfBatchProgress && (
+              <div className="mt-3 p-3 bg-amber-950/40 border border-amber-500/40 rounded-xl">
+                <div className="flex items-center justify-between text-xs text-amber-300 mb-1.5 font-bold">
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
+                    <span>جاري استخلاص ملفات PDF المجمعة: {pdfBatchProgress.filename}</span>
+                  </div>
+                  <span>{pdfBatchProgress.current} من {pdfBatchProgress.total} ملف</span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden">
+                  <div 
+                    className="bg-amber-500 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${(pdfBatchProgress.current / pdfBatchProgress.total) * 100}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Uploaded Batch Files Summary Chips */}
+            {uploadedBatchFiles.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-slate-800/60">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                    <Files className="w-4 h-4 text-amber-400" />
+                    <span>الملفات المستخلصة في هذه الجلسة ({uploadedBatchFiles.length} ملفات - إجمالي {returnItems.length} صنف):</span>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (confirm('هل تريد مسح الأصناف الحالية والبدء من جديد؟')) {
+                        setReturnItems([]);
+                        setUploadedBatchFiles([]);
+                        setOriginalInvoiceNo('');
+                        setOrderNo('');
+                        setReturnReceiptNo('');
+                      }
+                    }}
+                    className="text-[11px] text-red-400 hover:text-red-300 hover:underline"
+                  >
+                    تفريغ الكل
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {uploadedBatchFiles.map((bf, idx) => (
+                    <div 
+                      key={idx} 
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-950 border border-slate-700/80 rounded-lg text-xs"
+                    >
+                      <FileText className="w-3.5 h-3.5 text-amber-400" />
+                      <span className="text-slate-200 font-mono font-medium truncate max-w-[160px]" title={bf.name}>{bf.name}</span>
+                      {bf.invoiceNo && (
+                        <span className="text-[10px] bg-blue-950 text-blue-300 border border-blue-800/60 px-1 rounded font-mono">
+                          #{bf.invoiceNo}
+                        </span>
+                      )}
+                      <span className="text-[10px] bg-amber-950 text-amber-300 border border-amber-800/60 px-1 rounded font-bold">
+                        {bf.count} صنف ({bf.totalQty} حبة)
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Quick Real-time KPIs & Report Outcome Status */}
@@ -1160,31 +1436,152 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
             </button>
           </div>
 
-          {/* Items Table with Item Condition Toggles */}
+          {/* Items Table with Post-Scan Filter Pills & Item Condition Toggles */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
-            <div className="p-3 bg-slate-950/80 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={filterQuery}
-                  onChange={(e) => setFilterQuery(e.target.value)}
-                  placeholder={isRtl ? 'بحث بكود أو اسم الصنف...' : 'Search items...'}
-                  className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
-                />
+            {/* Filter Pills & Search Header */}
+            <div className="p-3 bg-slate-950/80 border-b border-slate-800 space-y-2.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2 flex-1">
+                  <div className="relative flex-1 min-w-[200px] max-w-md">
+                    <Search className="w-4 h-4 text-slate-500 absolute left-2.5 top-2 rtl:left-auto rtl:right-2.5" />
+                    <input
+                      type="text"
+                      value={filterQuery}
+                      onChange={(e) => setFilterQuery(e.target.value)}
+                      placeholder={isRtl ? 'بحث بكود، اسم صنف، رقم فاتورة، أو اسم ملف...' : 'Search code, item name, invoice #, file...'}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg pl-8 pr-2.5 rtl:pl-2.5 rtl:pr-8 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500"
+                    />
+                    {filterQuery && (
+                      <button
+                        onClick={() => setFilterQuery('')}
+                        className="absolute right-2 top-2 rtl:right-auto rtl:left-2 text-slate-500 hover:text-slate-300 text-xs font-bold"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
 
-                <select
-                  value={selectedConditionFilter}
-                  onChange={(e) => setSelectedConditionFilter(e.target.value)}
-                  className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-xs text-slate-300 focus:outline-none"
-                >
-                  <option value="ALL">كافة الأصناف ({returnItems.length})</option>
-                  <option value="VALID_FOR_RESTOCK">صالحة للارتجاع للمستودع</option>
-                  <option value="TRANSFERRED_TO_LAB">محولة للمعمل</option>
-                </select>
+                  <select
+                    value={selectedConditionFilter}
+                    onChange={(e) => setSelectedConditionFilter(e.target.value)}
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-amber-500"
+                  >
+                    <option value="ALL">كافة القرارات ({returnItems.length})</option>
+                    <option value="VALID_FOR_RESTOCK">صالحة للمستودع ({scanFilterStats.validRestock})</option>
+                    <option value="TRANSFERRED_TO_LAB">محولة للمعمل ({scanFilterStats.toLab})</option>
+                  </select>
+                </div>
+
+                <div className="text-xs text-slate-400 font-medium">
+                  عرض <span className="text-amber-400 font-bold font-mono">{filteredItems.length}</span> من <span className="font-mono">{returnItems.length}</span> صنف
+                </div>
               </div>
 
-              <div className="text-xs text-slate-400">
-                عرض {filteredItems.length} صنف — اضغط على زر حالة الحبة للتبديل السريع
+              {/* Real-time Post-Scan Filter Pills (فلترة الأصناف بعد وعبر المسح بالسكانر) */}
+              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                <span className="text-[11px] text-slate-400 font-bold ml-1 rtl:ml-0 rtl:mr-1">فلترة بعد المسح:</span>
+                
+                {/* 1. All Items */}
+                <button
+                  type="button"
+                  onClick={() => setScanStatusFilter('ALL')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    scanStatusFilter === 'ALL'
+                      ? 'bg-amber-600 text-white shadow-md'
+                      : 'bg-slate-800/80 text-slate-300 hover:bg-slate-800 border border-slate-700/60'
+                  }`}
+                >
+                  <List className="w-3.5 h-3.5" />
+                  <span>الكل</span>
+                  <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-slate-950/80 font-mono">
+                    {scanFilterStats.all}
+                  </span>
+                </button>
+
+                {/* 2. Scanned Fully (تم مسحه بالكامل) */}
+                <button
+                  type="button"
+                  onClick={() => setScanStatusFilter('SCANNED_FULL')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    scanStatusFilter === 'SCANNED_FULL'
+                      ? 'bg-emerald-600 text-white shadow-md'
+                      : 'bg-slate-800/80 text-emerald-300 hover:bg-slate-800 border border-emerald-900/60'
+                  }`}
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>تم مسحه بالكامل (100%)</span>
+                  <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-emerald-950 font-mono text-emerald-300 border border-emerald-800">
+                    {scanFilterStats.scannedFull}
+                  </span>
+                </button>
+
+                {/* 3. Scanned Partially (مسح جزئي) */}
+                <button
+                  type="button"
+                  onClick={() => setScanStatusFilter('SCANNED_PARTIAL')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    scanStatusFilter === 'SCANNED_PARTIAL'
+                      ? 'bg-blue-600 text-white shadow-md'
+                      : 'bg-slate-800/80 text-blue-300 hover:bg-slate-800 border border-blue-900/60'
+                  }`}
+                >
+                  <ScanLine className="w-3.5 h-3.5" />
+                  <span>مسح جزئي</span>
+                  <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-blue-950 font-mono text-blue-300 border border-blue-800">
+                    {scanFilterStats.scannedPartial}
+                  </span>
+                </button>
+
+                {/* 4. Not Scanned (لم يتم مسحه) */}
+                <button
+                  type="button"
+                  onClick={() => setScanStatusFilter('NOT_SCANNED')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    scanStatusFilter === 'NOT_SCANNED'
+                      ? 'bg-rose-700 text-white shadow-md'
+                      : 'bg-slate-800/80 text-rose-300 hover:bg-slate-800 border border-rose-900/60'
+                  }`}
+                >
+                  <Clock className="w-3.5 h-3.5" />
+                  <span>لم يتم مسحه</span>
+                  <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-rose-950 font-mono text-rose-300 border border-rose-800">
+                    {scanFilterStats.notScanned}
+                  </span>
+                </button>
+
+                {/* 5. Valid for Restock */}
+                <button
+                  type="button"
+                  onClick={() => setScanStatusFilter('VALID_FOR_RESTOCK')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    scanStatusFilter === 'VALID_FOR_RESTOCK'
+                      ? 'bg-teal-600 text-white shadow-md'
+                      : 'bg-slate-800/80 text-teal-300 hover:bg-slate-800 border border-teal-900/60'
+                  }`}
+                >
+                  <PackageCheck className="w-3.5 h-3.5" />
+                  <span>صالح للمستودع</span>
+                  <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-teal-950 font-mono text-teal-300 border border-teal-800">
+                    {scanFilterStats.validRestock}
+                  </span>
+                </button>
+
+                {/* 6. Transferred to Lab */}
+                <button
+                  type="button"
+                  onClick={() => setScanStatusFilter('TRANSFERRED_TO_LAB')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    scanStatusFilter === 'TRANSFERRED_TO_LAB'
+                      ? 'bg-amber-600 text-white shadow-md'
+                      : 'bg-slate-800/80 text-amber-300 hover:bg-slate-800 border border-amber-900/60'
+                  }`}
+                >
+                  <FlaskConical className="w-3.5 h-3.5" />
+                  <span>محول للمعمل</span>
+                  <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-amber-950 font-mono text-amber-300 border border-amber-800">
+                    {scanFilterStats.toLab}
+                  </span>
+                </button>
               </div>
             </div>
 
@@ -1193,13 +1590,14 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                 <thead className="bg-slate-950 text-slate-400 font-bold border-b border-slate-800">
                   <tr>
                     <th className="p-2.5 text-center w-8">#</th>
-                    <th className="p-2.5">الباركود واسم الصنف</th>
+                    <th className="p-2.5">الباركود واسم الصنف ومصدر الملف</th>
                     <th className="p-2.5 text-center">المقاس / اللون</th>
                     <th className="p-2.5 text-center">كمية الفاتورة</th>
+                    <th className="p-2.5 text-center bg-blue-950/30 text-blue-300">المجموع الفرعي (PDF)</th>
                     <th className="p-2.5 text-center">المرتجع الفعلي</th>
-                    <th className="p-2.5 text-center">الممسوح</th>
+                    <th className="p-2.5 text-center">المسح بالسكانر</th>
                     <th className="p-2.5 text-center">سعر الوحدة</th>
-                    <th className="p-2.5 text-center">مبلغ الاسترداد</th>
+                    <th className="p-2.5 text-center bg-purple-950/30 text-purple-300">مبلغ الاسترداد</th>
                     <th className="p-2.5 text-center">الحالة / التوجيه</th>
                     <th className="p-2.5 text-center">حالة التغليف والسبب</th>
                     <th className="p-2.5">ملاحظات الفحص</th>
@@ -1209,8 +1607,10 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                 <tbody className="divide-y divide-slate-800/60">
                   {filteredItems.length === 0 ? (
                     <tr>
-                      <td colSpan={12} className="p-8 text-center text-slate-500">
-                        لا توجد أصناف حالياً. ارفع ملف PDF الفاتورة أو امسح الباركود للبدء.
+                      <td colSpan={13} className="p-8 text-center text-slate-500">
+                        {returnItems.length === 0 
+                          ? 'لا توجد أصناف حالياً. ارفع ملف/ملفات PDF الفاتورة أو امسح الباركود للبدء.'
+                          : 'لا توجد أصناف تطابق معايير الفلترة المحددة.'}
                       </td>
                     </tr>
                   ) : (
@@ -1218,8 +1618,20 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                       <tr key={item.id} className="hover:bg-slate-800/40 transition-colors">
                         <td className="p-2.5 text-center font-mono text-slate-500">{idx + 1}</td>
                         <td className="p-2.5">
-                          <div className="font-bold text-white font-mono">{item.itemCode}</div>
-                          <div className="text-[11px] text-slate-400">{item.itemName}</div>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-bold text-white font-mono">{item.itemCode}</span>
+                            {item.invoiceNo && (
+                              <span className="text-[10px] bg-blue-950 text-blue-300 border border-blue-800/60 px-1 py-0.2 rounded font-mono">
+                                #{item.invoiceNo}
+                              </span>
+                            )}
+                            {item.sourceFile && (
+                              <span className="text-[9px] text-slate-400 font-mono truncate max-w-[120px]" title={item.sourceFile}>
+                                📄 {item.sourceFile}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-0.5">{item.itemName}</div>
                         </td>
                         <td className="p-2.5 text-center">
                           <div className="flex items-center justify-center gap-1">
@@ -1242,19 +1654,50 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                         <td className="p-2.5 text-center font-mono">
                           {item.invoicedQty} {item.unit}
                         </td>
+                        {/* Subtotal column from Invoice PDF */}
+                        <td className="p-2.5 text-center bg-blue-950/20">
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={item.subtotal ?? (item.invoicedQty * (item.unitPrice || 0))}
+                            onChange={(e) => handleUpdateItem(item.id, { subtotal: Number(e.target.value) || 0 })}
+                            className="w-20 bg-slate-950 border border-blue-900/60 rounded px-1.5 py-1 text-center font-mono font-bold text-blue-300 focus:outline-none focus:border-blue-500"
+                            title="المجموع الفرعي الإجمالي للصنف بالفاتورة"
+                          />
+                        </td>
                         <td className="p-2.5 text-center">
                           <input
                             type="number"
                             min="0"
+                            max={item.invoicedQty}
                             value={item.actualReturnedQty}
                             onChange={(e) => handleUpdateItem(item.id, { actualReturnedQty: Number(e.target.value) || 0 })}
                             className="w-16 bg-slate-950 border border-slate-700 rounded px-1.5 py-1 text-center font-mono font-bold text-amber-300 focus:outline-none focus:border-amber-500"
                           />
                         </td>
                         <td className="p-2.5 text-center font-mono">
-                          <span className={`px-2 py-0.5 rounded font-bold ${item.scannedQty === item.actualReturnedQty ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-slate-800 text-slate-300'}`}>
-                            {item.scannedQty}
-                          </span>
+                          <div className="flex flex-col items-center justify-center gap-0.5">
+                            <span className={`px-2 py-0.5 rounded text-xs font-bold font-mono inline-flex items-center gap-1 ${
+                              (item.scannedQty || 0) >= item.invoicedQty && item.invoicedQty > 0
+                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
+                                : (item.scannedQty || 0) > 0
+                                ? 'bg-blue-950 text-blue-300 border border-blue-700'
+                                : 'bg-slate-800 text-slate-400 border border-slate-700'
+                            }`}>
+                              {(item.scannedQty || 0) >= item.invoicedQty && item.invoicedQty > 0 && (
+                                <Check className="w-3 h-3 text-emerald-400" />
+                              )}
+                              <span>{item.scannedQty || 0} / {item.invoicedQty}</span>
+                            </span>
+                            <span className="text-[9px] font-sans font-medium text-slate-400">
+                              {(item.scannedQty || 0) >= item.invoicedQty && item.invoicedQty > 0
+                                ? 'مكتمل المسح'
+                                : (item.scannedQty || 0) > 0
+                                ? 'مسح جزئي'
+                                : 'بانتظار المسح'}
+                            </span>
+                          </div>
                         </td>
                         <td className="p-2.5 text-center">
                           <input
@@ -1264,10 +1707,16 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
                             value={item.unitPrice}
                             onChange={(e) => handleUpdateItem(item.id, { unitPrice: Number(e.target.value) || 0 })}
                             className="w-16 bg-slate-950 border border-slate-700 rounded px-1.5 py-1 text-center font-mono text-slate-200 focus:outline-none focus:border-amber-500"
+                            title="سعر الوحدة = المجموع الفرعي ÷ كمية الفاتورة"
                           />
                         </td>
-                        <td className="p-2.5 text-center font-mono font-bold text-purple-300">
-                          {item.refundTotal.toFixed(2)}
+                        <td className="p-2.5 text-center font-mono font-bold text-purple-300 bg-purple-950/20">
+                          <div>{item.refundTotal.toFixed(2)}</div>
+                          {item.actualReturnedQty < item.invoicedQty && item.actualReturnedQty > 0 && (
+                            <div className="text-[9px] text-purple-400 font-normal">
+                              ({item.actualReturnedQty} × {((item.subtotal || 0) / (item.invoicedQty || 1)).toFixed(2)})
+                            </div>
+                          )}
                         </td>
                         
                         {/* Status / Destination Routing Column (إلى المستودع أو إلى المعمل) */}

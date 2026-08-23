@@ -15,7 +15,8 @@ import type {
   PickingProductGroup,
   AggregatedPickingItem,
   WorkerExperienceLevel,
-  GroupDifficultyLevel
+  GroupDifficultyLevel,
+  DailyAuditSnapshot
 } from '../types';
 
 interface InvoiceAuditorDB extends DBSchema {
@@ -193,6 +194,10 @@ export async function saveMasterInvoiceItems(
   };
 
   await tx.objectStore('key_value').put(syncMeta, 'sync_metadata');
+  await tx.objectStore('key_value').delete('completed_invoices_map');
+  await tx.objectStore('key_value').delete('incomplete_invoices_map');
+  await tx.objectStore('key_value').delete('active_session');
+  await tx.objectStore('key_value').delete('is_batch_closed_and_counters_zeroed');
   await tx.done;
 
   return syncMeta;
@@ -367,6 +372,42 @@ export async function reopenCompletedInvoice(invoiceNo: string): Promise<void> {
     delete currentMap[target.orderNo.toLowerCase()];
   }
   await db.put('key_value', currentMap, 'completed_invoices_map');
+}
+
+// Daily Audit Snapshots and Counters History
+export async function saveDailyAuditSnapshot(snapshot: DailyAuditSnapshot): Promise<void> {
+  const db = await getDB();
+  const currentList = ((await db.get('key_value', 'daily_audit_snapshots')) as DailyAuditSnapshot[]) || [];
+  // Update if same id exists or prepend
+  const filtered = currentList.filter(s => s.id !== snapshot.id);
+  filtered.unshift(snapshot);
+  await db.put('key_value', filtered, 'daily_audit_snapshots');
+  await db.put('key_value', snapshot, 'latest_daily_audit_snapshot');
+  await db.put('key_value', true, 'is_batch_closed_and_counters_zeroed');
+}
+
+export async function getLatestDailyAuditSnapshot(): Promise<DailyAuditSnapshot | null> {
+  const db = await getDB();
+  const snapshot = await db.get('key_value', 'latest_daily_audit_snapshot');
+  return (snapshot as DailyAuditSnapshot) || null;
+}
+
+export async function getAllDailyAuditSnapshots(): Promise<DailyAuditSnapshot[]> {
+  const db = await getDB();
+  const list = await db.get('key_value', 'daily_audit_snapshots');
+  return (list as DailyAuditSnapshot[]) || [];
+}
+
+export async function isBatchClosedAndCountersZeroed(): Promise<boolean> {
+  const db = await getDB();
+  const val = await db.get('key_value', 'is_batch_closed_and_counters_zeroed');
+  return Boolean(val);
+}
+
+export async function resetActiveBatchCountersState(): Promise<void> {
+  const db = await getDB();
+  await db.delete('key_value', 'is_batch_closed_and_counters_zeroed');
+  await db.delete('key_value', 'latest_daily_audit_snapshot');
 }
 
 // Global Audit Counters
