@@ -51,6 +51,7 @@ interface VerticalServicesDrawerProps {
   onOpenApkGuide: () => void;
   onOpenSyncModal: () => void;
   onOpenAuditorModal: () => void;
+  onOpenFirebaseModal?: () => void;
 }
 
 export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
@@ -68,6 +69,7 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
   onOpenApkGuide,
   onOpenSyncModal,
   onOpenAuditorModal,
+  onOpenFirebaseModal,
 }) => {
   if (!isOpen) return null;
 
@@ -386,13 +388,25 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
         </div>
 
         {/* Drawer Bottom Actions */}
-        <div className="p-3.5 bg-slate-950 border-t border-slate-800 flex items-center justify-between gap-2">
+        <div className="p-3.5 bg-slate-950 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-2">
+          {onOpenFirebaseModal && (
+            <button
+              onClick={() => {
+                onOpenFirebaseModal();
+                onClose();
+              }}
+              className="w-full sm:flex-1 py-2 px-3 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 rounded-xl text-xs font-bold border border-amber-700/40 flex items-center justify-center gap-2 transition-all"
+            >
+              <span>{isRtl ? 'سحابة Firebase' : 'Firebase Cloud'}</span>
+            </button>
+          )}
+
           <button
             onClick={() => {
               onOpenSyncModal();
               onClose();
             }}
-            className="flex-1 py-2 px-3 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 rounded-xl text-xs font-bold border border-emerald-700/40 flex items-center justify-center gap-2 transition-all"
+            className="w-full sm:flex-1 py-2 px-3 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 rounded-xl text-xs font-bold border border-emerald-700/40 flex items-center justify-center gap-2 transition-all"
           >
             <span>{isRtl ? 'مزامنة إكسيل اليوم' : 'Daily Excel Sync'}</span>
           </button>
@@ -402,7 +416,7 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
               onOpenApkGuide();
               onClose();
             }}
-            className="flex-1 py-2 px-3 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 rounded-xl text-xs font-bold border border-indigo-700/40 flex items-center justify-center gap-2 transition-all"
+            className="w-full sm:flex-1 py-2 px-3 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 rounded-xl text-xs font-bold border border-indigo-700/40 flex items-center justify-center gap-2 transition-all"
           >
             <Smartphone className="w-3.5 h-3.5" />
             <span>{isRtl ? 'دليل APK للأندرويد' : 'APK Guide'}</span>

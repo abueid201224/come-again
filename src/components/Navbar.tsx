@@ -19,7 +19,8 @@ import {
   ListFilter,
   Menu,
   Sparkles,
-  ChevronDown
+  ChevronDown,
+  Cloud
 } from 'lucide-react';
 import type { SyncMetadata, AppSettings } from '../types';
 import { translations } from '../services/i18n';
@@ -44,6 +45,7 @@ interface NavbarProps {
   onOpenAuditorModal?: () => void;
   onToggleDrawer?: () => void;
   onOpenApkGuide?: () => void;
+  onOpenFirebaseModal?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -64,6 +66,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAuditorModal,
   onToggleDrawer,
   onOpenApkGuide,
+  onOpenFirebaseModal,
 }) => {
   const t = translations[settings.language] || translations.en;
   const isRtl = settings.language === 'ar';
@@ -197,6 +200,19 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             {settings.soundEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
           </button>
+
+          {/* Firebase Cloud Sync Button */}
+          {onOpenFirebaseModal && (
+            <button
+              id="navbar-firebase-sync-btn"
+              onClick={onOpenFirebaseModal}
+              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-gradient-to-r from-amber-600/30 to-orange-600/30 hover:from-amber-600/50 hover:to-orange-600/50 text-amber-300 border border-amber-500/40 text-xs font-bold transition-all shadow-sm active:scale-95"
+              title={isRtl ? 'المزامنة السحابية وقاعدة بيانات Firebase' : 'Firebase Cloud Sync & Auth'}
+            >
+              <Cloud className="w-4 h-4 text-amber-400" />
+              <span className="hidden md:inline">{isRtl ? 'سحابة Firebase' : 'Cloud Sync'}</span>
+            </button>
+          )}
 
           {/* CRITICAL: Daily Excel Update Button */}
           <button

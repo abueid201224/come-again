@@ -45,6 +45,8 @@ import { PickingWaveScreen } from './components/PickingWaveScreen';
 import { VerticalServicesDrawer } from './components/VerticalServicesDrawer';
 import { AndroidApkGuideModal } from './components/AndroidApkGuideModal';
 import { MobileBottomNav } from './components/MobileBottomNav';
+import { FirebaseSyncModal } from './components/FirebaseSyncModal';
+import { AuthProvider } from './context/AuthContext';
 
 // Helper for finding matching key ignoring case, whitespace, and leading zeros
 function findMatchingItemKey(items: Record<string, ScannedAuditItem>, code: string): string | null {
@@ -78,6 +80,7 @@ export function App() {
   const [overdueLabCount, setOverdueLabCount] = useState<number>(0);
   
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [isFirebaseModalOpen, setIsFirebaseModalOpen] = useState(false);
   const [isAuditorModalOpen, setIsAuditorModalOpen] = useState(false);
   const [isServicesDrawerOpen, setIsServicesDrawerOpen] = useState(false);
   const [isApkGuideModalOpen, setIsApkGuideModalOpen] = useState(false);
@@ -453,6 +456,7 @@ export function App() {
         onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
         onToggleDrawer={() => setIsServicesDrawerOpen(prev => !prev)}
         onOpenApkGuide={() => setIsApkGuideModalOpen(true)}
+        onOpenFirebaseModal={() => setIsFirebaseModalOpen(true)}
       />
 
       {/* Main Screen Content */}
@@ -589,6 +593,14 @@ export function App() {
         onOpenApkGuide={() => setIsApkGuideModalOpen(true)}
         onOpenSyncModal={() => setIsSyncModalOpen(true)}
         onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
+        onOpenFirebaseModal={() => setIsFirebaseModalOpen(true)}
+      />
+
+      {/* Firebase Cloud Sync & Auth Modal */}
+      <FirebaseSyncModal
+        isOpen={isFirebaseModalOpen}
+        onClose={() => setIsFirebaseModalOpen(false)}
+        isRtl={isRtl}
       />
 
       {/* Android Studio APK Build Guide & PDF Export Modal */}
