@@ -74,6 +74,7 @@ import {
 import { SoundEffects } from '../services/audio';
 import { ReopenConfirmationModal } from './ReopenConfirmationModal';
 import { InternalDiscrepancyModal } from './InternalDiscrepancyModal';
+import { PdfBatchUploadModal, type BatchExtractionResult } from './PdfBatchUploadModal';
 
 interface ReturnsScreenProps {
   settings: AppSettings;
@@ -129,6 +130,7 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
   const [selectedConditionFilter, setSelectedConditionFilter] = useState<string>('ALL');
   const [scanStatusFilter, setScanStatusFilter] = useState<'ALL' | 'SCANNED_FULL' | 'SCANNED_PARTIAL' | 'NOT_SCANNED' | 'OVER_SCANNED' | 'VALID_FOR_RESTOCK' | 'TRANSFERRED_TO_LAB'>('ALL');
   const [isLoadingPdf, setIsLoadingPdf] = useState(false);
+  const [isPdfBatchModalOpen, setIsPdfBatchModalOpen] = useState(false);
   const [pdfBatchProgress, setPdfBatchProgress] = useState<{ current: number; total: number; filename: string } | null>(null);
   const [uploadedBatchFiles, setUploadedBatchFiles] = useState<{ name: string; invoiceNo?: string; count: number; totalQty: number }[]>([]);
   const [manualBarcode, setManualBarcode] = useState('');
@@ -500,6 +502,43 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
       setPdfBatchProgress(null);
       e.target.value = '';
     }
+  };
+
+  // Handle completion from full interactive PdfBatchUploadModal
+  const handleBatchExtractionComplete = (result: BatchExtractionResult) => {
+    if (result.appendMode) {
+      setReturnItems(prev => [...prev, ...result.items]);
+      setUploadedBatchFiles(prev => [...prev, ...result.fileSummaries]);
+      if (result.originalInvoiceNos.length > 0) {
+        const currentInvoices = originalInvoiceNo ? originalInvoiceNo.split(/[,،]\s*/).map(s => s.trim()) : [];
+        const mergedInvs = Array.from(new Set([...currentInvoices, ...result.originalInvoiceNos]));
+        setOriginalInvoiceNo(mergedInvs.join(', '));
+      }
+    } else {
+      setReturnItems(result.items);
+      setUploadedBatchFiles(result.fileSummaries);
+      if (result.originalInvoiceNos.length > 0) {
+        setOriginalInvoiceNo(result.originalInvoiceNos.join(', '));
+      }
+      if (result.orderNos.length > 0) {
+        setOrderNo(result.orderNos.join(', '));
+        setReturnReceiptNo(formatReturnReceiptNo(result.orderNos[0]));
+      }
+      if (result.customerNames.length > 0) {
+        setCustomerName(result.customerNames.join(' / '));
+      }
+      if (result.paymentMethods.length > 0) {
+        setPaymentMethod(result.paymentMethods[0]);
+      }
+    }
+
+    if (settings.soundEnabled) SoundEffects.playInvoiceLock(settings.soundVolume);
+    setScanNotification({
+      message: isRtl 
+        ? `✅ تم استخلاص ${result.fileSummaries.length} ملف PDF بنجاح (إجمالي ${result.items.length} صنف). جاهز للمسح بالسكانر والفلترة.` 
+        : `✅ Extracted ${result.fileSummaries.length} PDF file(s) successfully (${result.items.length} items). Ready for scan & filter.`,
+      type: 'INVOICE'
+    });
   };
 
   // Handle Excel Upload
@@ -956,6 +995,18 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
           {/* Quick Export Actions for Officer & Emailing */}
           <div className="flex flex-wrap items-center gap-2">
             <button
+              onClick={() => setIsPdfBatchModalOpen(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-gradient-to-r from-amber-600 via-amber-500 to-amber-600 hover:from-amber-500 hover:to-amber-400 text-xs font-bold text-white shadow-lg shadow-amber-900/30 transition-all border border-amber-400/40 animate-pulse hover:animate-none"
+              title="رفع واستخلاص ملفات PDF المرتجعات مع متابعة تقدم الرفع وتفكيك الأصناف خطوة بخطوة"
+            >
+              <FileUp className="w-4 h-4 text-white" />
+              <span>رفع واستخلاص PDF مع مؤشر التقدم</span>
+              <span className="bg-slate-950/80 text-[10px] px-1.5 py-0.5 rounded text-amber-300 font-mono">
+                Batch AI
+              </span>
+            </button>
+
+            <button
               onClick={() => setIsEmailModalOpen(true)}
               className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-xs font-bold text-white shadow-md transition-all border border-purple-400/30"
               title="إعداد رسالة البريد الإلكتروني للموظف المختص مرفقاً بها تقرير الاسترداد المالي والإكسيل"
@@ -1266,10 +1317,23 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
             {/* Smart Import Buttons & Multi-PDF Batch Support */}
             <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
               <div className="flex flex-wrap items-center gap-2">
-                {/* Multi-PDF Batch Upload (Replaces session or starts fresh) */}
-                <label className="flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white rounded-lg text-xs font-bold cursor-pointer transition-all shadow-md">
-                  <Files className="w-4 h-4" />
-                  <span>{isLoadingPdf ? 'جاري قراءة الملفات...' : 'استيراد PDF مجمّع (ملف أو عدة ملفات)'}</span>
+                {/* Primary Button: Open interactive Batch PDF Upload Modal with step-by-step progress */}
+                <button
+                  type="button"
+                  onClick={() => setIsPdfBatchModalOpen(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white rounded-lg text-xs font-bold transition-all shadow-md"
+                >
+                  <FileUp className="w-4 h-4 text-white" />
+                  <span>رفع واستخلاص ملفات PDF (استيراد مجمّع مع متابعة التقدم)</span>
+                  <span className="bg-slate-950/80 text-[10px] px-1.5 py-0.5 rounded text-amber-300 font-mono">
+                    AI Auto
+                  </span>
+                </button>
+
+                {/* Quick Direct PDF Batch Upload (Replaces session or starts fresh) */}
+                <label className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-sm">
+                  <Files className="w-4 h-4 text-amber-400" />
+                  <span>{isLoadingPdf ? 'جاري قراءة الملفات...' : 'استيراد سريع PDF'}</span>
                   <input
                     type="file"
                     accept=".pdf"
@@ -1282,8 +1346,8 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
 
                 {/* Append Additional PDFs to Current Session */}
                 {returnItems.length > 0 && (
-                  <label className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-sm">
-                    <FolderPlus className="w-4 h-4 text-amber-400" />
+                  <label className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/40 rounded-lg text-xs font-bold cursor-pointer transition-all shadow-sm">
+                    <FolderPlus className="w-4 h-4 text-emerald-400" />
                     <span>إضافة ملفات PDF أخرى (+ دمج)</span>
                     <input
                       type="file"
@@ -2873,6 +2937,16 @@ ${methodLines || 'لا توجد طلبات مسجلة'}
         wrongPickings={wrongPickings}
         onRefresh={onRefreshDiscrepancies}
         settings={settings}
+      />
+
+      {/* Interactive Multi-PDF Batch Upload & Progress Extraction Modal */}
+      <PdfBatchUploadModal
+        isOpen={isPdfBatchModalOpen}
+        onClose={() => setIsPdfBatchModalOpen(false)}
+        onExtractionComplete={handleBatchExtractionComplete}
+        currentItemsCount={returnItems.length}
+        settings={settings}
+        isRtl={isRtl}
       />
     </div>
   );
