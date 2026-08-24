@@ -80,18 +80,21 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Test Connection to Firestore
-export async function testFirestoreConnection(): Promise<boolean> {
+// Test Connection to Firestore (Non-intrusive, offline-aware)
+export async function testFirestoreConnection(timeoutMs = 2500): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return false;
+  }
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
+    const testPromise = getDocFromServer(doc(db, 'test', 'connection'));
+    const timeoutPromise = new Promise<never>((_, reject) => 
+      setTimeout(() => reject(new Error('offline')), timeoutMs)
+    );
+    await Promise.race([testPromise, timeoutPromise]);
     return true;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firebase client is in offline mode.');
-      return false;
-    }
-    // Expected to return permission or empty doc on test
-    return true;
+  } catch (_error: unknown) {
+    // In offline-first systems, failing to reach the cloud server is expected when offline or restricted
+    return false;
   }
 }
 

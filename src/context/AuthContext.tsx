@@ -24,17 +24,44 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isCloudConnected, setIsCloudConnected] = useState(false);
 
   useEffect(() => {
+    let isMounted = true;
+    
     // Check initial connection
-    testFirestoreConnection().then(connected => {
-      setIsCloudConnected(connected);
-    });
+    const checkConnection = () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (isMounted) setIsCloudConnected(false);
+        return;
+      }
+      testFirestoreConnection().then(connected => {
+        if (isMounted) setIsCloudConnected(connected);
+      }).catch(() => {
+        if (isMounted) setIsCloudConnected(false);
+      });
+    };
+
+    checkConnection();
+
+    const handleOnline = () => checkConnection();
+    const handleOffline = () => {
+      if (isMounted) setIsCloudConnected(false);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
 
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
-      setIsLoading(false);
+      if (isMounted) {
+        setCurrentUser(user);
+        setIsLoading(false);
+      }
     });
 
-    return () => unsubscribe();
+    return () => {
+      isMounted = false;
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      unsubscribe();
+    };
   }, []);
 
   const handleLogin = async () => {
