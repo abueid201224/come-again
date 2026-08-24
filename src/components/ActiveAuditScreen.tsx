@@ -73,6 +73,7 @@ import { SoundEffects } from '../services/audio';
 import { translations } from '../services/i18n';
 import { CameraQrScannerModal } from './CameraQrScannerModal';
 import { InternalDiscrepancyModal } from './InternalDiscrepancyModal';
+import { BookOpen } from 'lucide-react';
 
 interface ActiveAuditScreenProps {
   activeSession: ActiveInvoiceSession | null;
@@ -92,6 +93,7 @@ interface ActiveAuditScreenProps {
   discrepancies?: AuditDiscrepancy[];
   wrongPickings?: WrongPickingRecord[];
   onRefreshDiscrepancies?: () => void;
+  onOpenLogicGuide?: (tab?: string) => void;
 }
 
 // Normalizes barcode strings to ensure robust random matching (ignores leading zeroes and whitespace)
@@ -120,6 +122,7 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
   discrepancies = [],
   wrongPickings = [],
   onRefreshDiscrepancies = () => {},
+  onOpenLogicGuide,
 }) => {
   const t = translations[settings.language] || translations.en;
   const isRtl = settings.language === 'ar';
@@ -1058,6 +1061,19 @@ export const ActiveAuditScreen: React.FC<ActiveAuditScreenProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Logic & Math Guide Button */}
+            {onOpenLogicGuide && (
+              <button
+                type="button"
+                onClick={() => onOpenLogicGuide('audit')}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-purple-950/80 hover:bg-purple-900 border border-purple-700/60 text-purple-300 text-[11px] font-bold transition-all shadow-sm"
+                title={isRtl ? 'دليل المنطق والمعادلات والحلول الرقابية للتدقيق' : 'Dispatch Audit Logic & Equations'}
+              >
+                <BookOpen className="w-3.5 h-3.5 text-purple-400" />
+                <span>{isRtl ? 'المنطق والمعادلات 💡' : 'Logic Guide'}</span>
+              </button>
+            )}
+
             {/* Quick Internal Discrepancy report trigger */}
             <button
               type="button"

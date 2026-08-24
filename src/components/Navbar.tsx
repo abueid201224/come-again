@@ -20,10 +20,13 @@ import {
   Menu,
   Sparkles,
   ChevronDown,
-  Cloud
+  Cloud,
+  BookOpen,
+  HelpCircle
 } from 'lucide-react';
 import type { SyncMetadata, AppSettings } from '../types';
 import { translations } from '../services/i18n';
+import type { LogicGuideTab } from './LogicGuideModal';
 
 export type ActiveNavTab = 'audit' | 'receiving' | 'returns' | 'inventory' | 'picking' | 'errors' | 'master' | 'settings';
 
@@ -46,6 +49,7 @@ interface NavbarProps {
   onToggleDrawer?: () => void;
   onOpenApkGuide?: () => void;
   onOpenFirebaseModal?: () => void;
+  onOpenLogicGuide?: (tab?: LogicGuideTab) => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -67,6 +71,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleDrawer,
   onOpenApkGuide,
   onOpenFirebaseModal,
+  onOpenLogicGuide,
 }) => {
   const t = translations[settings.language] || translations.en;
   const isRtl = settings.language === 'ar';
@@ -127,6 +132,19 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Action Controls & Sync Button */}
         <div className="flex items-center gap-1.5 sm:gap-2">
+          {/* Logic & Math Guide Modal Button */}
+          {onOpenLogicGuide && (
+            <button
+              id="navbar-logic-guide-btn"
+              onClick={() => onOpenLogicGuide(currentTab as LogicGuideTab)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-purple-500/40 bg-purple-950/40 hover:bg-purple-900/60 text-xs font-bold text-purple-300 transition-all shadow-sm active:scale-95"
+              title={isRtl ? 'دليل المنطق والمعادلات والحلول الرقابية وطرق بناء الفرضيات' : 'WMS Logic, Math Formulas & Troubleshooting Guide'}
+            >
+              <BookOpen className="w-4 h-4 text-purple-400" />
+              <span className="hidden md:inline">{isRtl ? 'دليل المنطق والمعادلات 💡' : 'Logic & Formulas'}</span>
+            </button>
+          )}
+
           {/* Android APK Guide & PDF Download Trigger */}
           {onOpenApkGuide && (
             <button
@@ -247,13 +265,26 @@ export const Navbar: React.FC<NavbarProps> = ({
             <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
           </button>
 
-          <button
-            onClick={onToggleDrawer}
-            className="text-[11px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center gap-1 bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-800/40"
-          >
-            <Sparkles className="w-3 h-3 text-indigo-400" />
-            <span>{isRtl ? 'تبديل الخدمة الرأسية' : 'Switch Service'}</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            {onOpenLogicGuide && (
+              <button
+                onClick={() => onOpenLogicGuide(currentTab as LogicGuideTab)}
+                className="text-[11px] text-purple-300 hover:text-purple-200 font-bold flex items-center gap-1 bg-purple-950/60 px-2 py-0.5 rounded border border-purple-800/40 transition-all"
+                title={isRtl ? 'فتح دليل المنطق والمعادلات والحلول لهذه الخدمة' : 'Open Logic & Formula Guide for this service'}
+              >
+                <BookOpen className="w-3 h-3 text-purple-400" />
+                <span className="hidden xs:inline">{isRtl ? 'المنطق والمعادلات' : 'Logic Guide'}</span>
+              </button>
+            )}
+
+            <button
+              onClick={onToggleDrawer}
+              className="text-[11px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center gap-1 bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-800/40"
+            >
+              <Sparkles className="w-3 h-3 text-indigo-400" />
+              <span>{isRtl ? 'تبديل الخدمة الرأسية' : 'Switch Service'}</span>
+            </button>
+          </div>
         </div>
       )}
 

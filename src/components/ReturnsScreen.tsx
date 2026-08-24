@@ -38,7 +38,8 @@ import {
   ListFilter,
   SlidersHorizontal,
   FileUp,
-  List
+  List,
+  BookOpen
 } from 'lucide-react';
 import type { 
   AppSettings, 
@@ -84,6 +85,7 @@ interface ReturnsScreenProps {
   discrepancies?: AuditDiscrepancy[];
   wrongPickings?: WrongPickingRecord[];
   onRefreshDiscrepancies?: () => void;
+  onOpenLogicGuide?: (tab?: string) => void;
 }
 
 type ReturnsSubTab = 'editor' | 'pending_lab' | 'weekly_lab_report' | 'refunds' | 'completed_archive';
@@ -96,6 +98,7 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
   discrepancies = [],
   wrongPickings = [],
   onRefreshDiscrepancies = () => {},
+  onOpenLogicGuide,
 }) => {
   const isRtl = settings.language === 'ar';
 
@@ -994,6 +997,17 @@ export const ReturnsScreen: React.FC<ReturnsScreenProps> = ({
 
           {/* Quick Export Actions for Officer & Emailing */}
           <div className="flex flex-wrap items-center gap-2">
+            {onOpenLogicGuide && (
+              <button
+                onClick={() => onOpenLogicGuide('returns')}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-purple-950/80 hover:bg-purple-900 border border-purple-700/60 text-xs font-bold text-purple-300 shadow-sm transition-all"
+                title="دليل المنطق والمعادلات والحلول الرقابية للمرتجعات وفحص الجودة والاسترداد"
+              >
+                <BookOpen className="w-4 h-4 text-purple-400" />
+                <span>المنطق والمعادلات 💡</span>
+              </button>
+            )}
+
             <button
               onClick={() => setIsPdfBatchModalOpen(true)}
               className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-gradient-to-r from-amber-600 via-amber-500 to-amber-600 hover:from-amber-500 hover:to-amber-400 text-xs font-bold text-white shadow-lg shadow-amber-900/30 transition-all border border-amber-400/40 animate-pulse hover:animate-none"

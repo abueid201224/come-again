@@ -23,7 +23,8 @@ import {
   Lock,
   Unlock,
   Eye,
-  X
+  X,
+  BookOpen
 } from 'lucide-react';
 import type { 
   AppSettings, 
@@ -54,11 +55,13 @@ import { ReopenConfirmationModal } from './ReopenConfirmationModal';
 interface ReceivingScreenProps {
   settings: AppSettings;
   lastScannedCode?: string | null;
+  onOpenLogicGuide?: (tab?: string) => void;
 }
 
 export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
   settings,
   lastScannedCode,
+  onOpenLogicGuide,
 }) => {
   const isRtl = settings.language === 'ar';
 
@@ -428,6 +431,18 @@ export const ReceivingScreen: React.FC<ReceivingScreenProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {onOpenLogicGuide && (
+              <button
+                type="button"
+                onClick={() => onOpenLogicGuide('receiving')}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-purple-950/80 hover:bg-purple-900 text-xs font-bold text-purple-300 border border-purple-700/60 shadow-sm transition-all"
+                title={isRtl ? 'دليل المنطق والمعادلات والحلول الرقابية للاستلام' : 'Inbound Receiving Logic & Equations'}
+              >
+                <BookOpen className="w-4 h-4 text-purple-400" />
+                <span>{isRtl ? 'المنطق والمعادلات 💡' : 'Logic Guide'}</span>
+              </button>
+            )}
+
             <button
               onClick={() => exportAllReceivingReportsToExcel(savedReports)}
               className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-700/80 hover:bg-emerald-600 text-xs font-bold text-white border border-emerald-500/50 shadow-sm"

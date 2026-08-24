@@ -33,7 +33,8 @@ import {
   X,
   FileCheck,
   ShieldCheck,
-  Sparkle
+  Sparkle,
+  BookOpen
 } from 'lucide-react';
 import type { 
   AppSettings, 
@@ -74,11 +75,13 @@ import { PreReportAuditModal } from './PreReportAuditModal';
 interface PickingWaveScreenProps {
   settings: AppSettings;
   lastScannedCode?: string | null;
+  onOpenLogicGuide?: (tab?: string) => void;
 }
 
 export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
   settings,
   lastScannedCode,
+  onOpenLogicGuide,
 }) => {
   const isRtl = settings.language === 'ar';
 
@@ -886,6 +889,18 @@ export const PickingWaveScreen: React.FC<PickingWaveScreenProps> = ({
 
           {/* Quick Action Buttons */}
           <div className="flex flex-wrap items-center gap-2">
+            {onOpenLogicGuide && (
+              <button
+                type="button"
+                onClick={() => onOpenLogicGuide('picking')}
+                className="bg-purple-950/80 hover:bg-purple-900 text-purple-300 border border-purple-700/60 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"
+                title={isRtl ? 'دليل المنطق والمعادلات والحلول الرقابية لموجات الانتقاء وخوارزمية التوزيع' : 'Picking Wave Logic & Algorithm Guide'}
+              >
+                <BookOpen className="w-4 h-4 text-purple-400" />
+                <span>{isRtl ? 'المنطق والمعادلات 💡' : 'Logic Guide'}</span>
+              </button>
+            )}
+
             <button
               onClick={() => exportAllPickingWavesToExcel(savedWaves)}
               className="bg-emerald-700/80 hover:bg-emerald-600 text-white border border-emerald-500/50 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"

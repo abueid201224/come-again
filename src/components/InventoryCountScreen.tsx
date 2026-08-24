@@ -24,7 +24,8 @@ import {
   Lock,
   Unlock,
   Eye,
-  X
+  X,
+  BookOpen
 } from 'lucide-react';
 import type { AppSettings, InventoryCountItem, InventoryCountReport, PackagingGroupRule, ActiveTargetColumn, DocumentReopenPrompt } from '../types';
 import { 
@@ -49,11 +50,13 @@ import { ReopenConfirmationModal } from './ReopenConfirmationModal';
 interface InventoryCountScreenProps {
   settings: AppSettings;
   lastScannedCode?: string | null;
+  onOpenLogicGuide?: (tab?: string) => void;
 }
 
 export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
   settings,
   lastScannedCode,
+  onOpenLogicGuide,
 }) => {
   const isRtl = settings.language === 'ar';
 
@@ -393,6 +396,18 @@ export const InventoryCountScreen: React.FC<InventoryCountScreenProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {onOpenLogicGuide && (
+              <button
+                type="button"
+                onClick={() => onOpenLogicGuide('inventory')}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-purple-950/80 hover:bg-purple-900 text-xs font-bold text-purple-300 border border-purple-700/60 shadow-sm transition-all"
+                title={isRtl ? 'دليل المنطق والمعادلات والحلول الرقابية للجرد وتفكيك العبوات' : 'Cycle Count & Packaging Logic Guide'}
+              >
+                <BookOpen className="w-4 h-4 text-purple-400" />
+                <span>{isRtl ? 'المنطق والمعادلات 💡' : 'Logic Guide'}</span>
+              </button>
+            )}
+
             {/* FAST COUNT MODE TOGGLE BUTTON */}
             <button
               onClick={() => setIsFastCountMode(!isFastCountMode)}

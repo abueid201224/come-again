@@ -16,13 +16,15 @@ import {
   Sparkles,
   ArrowUpRight,
   Radio,
-  FileSignature
+  FileSignature,
+  BookOpen
 } from 'lucide-react';
 import type { ActiveNavTab } from './Navbar';
 import type { AppSettings, SyncMetadata, ActiveInvoiceSession } from '../types';
+import type { LogicGuideTab } from './LogicGuideModal';
 
 interface ServiceItem {
-  id: ActiveNavTab | 'apk-guide';
+  id: ActiveNavTab | 'apk-guide' | 'logic-guide';
   titleAr: string;
   titleEn: string;
   subtitleAr: string;
@@ -52,6 +54,7 @@ interface VerticalServicesDrawerProps {
   onOpenSyncModal: () => void;
   onOpenAuditorModal: () => void;
   onOpenFirebaseModal?: () => void;
+  onOpenLogicGuide?: (tab?: LogicGuideTab) => void;
 }
 
 export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
@@ -70,6 +73,7 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
   onOpenSyncModal,
   onOpenAuditorModal,
   onOpenFirebaseModal,
+  onOpenLogicGuide,
 }) => {
   if (!isOpen) return null;
 
@@ -209,9 +213,11 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
   const activeServiceItem = allServices.find(s => s.id === currentTab) || allServices[0];
   const otherServices = allServices.filter(s => s.id !== currentTab);
 
-  const handleSelect = (serviceId: ActiveNavTab | 'apk-guide') => {
+  const handleSelect = (serviceId: ActiveNavTab | 'apk-guide' | 'logic-guide') => {
     if (serviceId === 'apk-guide') {
       onOpenApkGuide();
+    } else if (serviceId === 'logic-guide') {
+      if (onOpenLogicGuide) onOpenLogicGuide('all');
     } else {
       onSelectTab(serviceId);
     }
@@ -388,39 +394,54 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
         </div>
 
         {/* Drawer Bottom Actions */}
-        <div className="p-3.5 bg-slate-950 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-2">
-          {onOpenFirebaseModal && (
+        <div className="p-3.5 bg-slate-950 border-t border-slate-800 flex flex-col gap-2">
+          {onOpenLogicGuide && (
             <button
               onClick={() => {
-                onOpenFirebaseModal();
+                onOpenLogicGuide(currentTab as LogicGuideTab);
                 onClose();
               }}
-              className="w-full sm:flex-1 py-2 px-3 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 rounded-xl text-xs font-bold border border-amber-700/40 flex items-center justify-center gap-2 transition-all"
+              className="w-full py-2 px-3 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 rounded-xl text-xs font-bold border border-purple-700/40 flex items-center justify-center gap-2 transition-all shadow-sm"
             >
-              <span>{isRtl ? 'سحابة Firebase' : 'Firebase Cloud'}</span>
+              <BookOpen className="w-4 h-4 text-purple-400" />
+              <span>{isRtl ? 'دليل المنطق والمعادلات والحلول الرقابية 💡' : 'Logic & Math Formulas Guide'}</span>
             </button>
           )}
 
-          <button
-            onClick={() => {
-              onOpenSyncModal();
-              onClose();
-            }}
-            className="w-full sm:flex-1 py-2 px-3 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 rounded-xl text-xs font-bold border border-emerald-700/40 flex items-center justify-center gap-2 transition-all"
-          >
-            <span>{isRtl ? 'مزامنة إكسيل اليوم' : 'Daily Excel Sync'}</span>
-          </button>
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-2">
+            {onOpenFirebaseModal && (
+              <button
+                onClick={() => {
+                  onOpenFirebaseModal();
+                  onClose();
+                }}
+                className="w-full sm:flex-1 py-2 px-3 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 rounded-xl text-xs font-bold border border-amber-700/40 flex items-center justify-center gap-2 transition-all"
+              >
+                <span>{isRtl ? 'سحابة Firebase' : 'Firebase Cloud'}</span>
+              </button>
+            )}
 
-          <button
-            onClick={() => {
-              onOpenApkGuide();
-              onClose();
-            }}
-            className="w-full sm:flex-1 py-2 px-3 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 rounded-xl text-xs font-bold border border-indigo-700/40 flex items-center justify-center gap-2 transition-all"
-          >
-            <Smartphone className="w-3.5 h-3.5" />
-            <span>{isRtl ? 'دليل APK للأندرويد' : 'APK Guide'}</span>
-          </button>
+            <button
+              onClick={() => {
+                onOpenSyncModal();
+                onClose();
+              }}
+              className="w-full sm:flex-1 py-2 px-3 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 rounded-xl text-xs font-bold border border-emerald-700/40 flex items-center justify-center gap-2 transition-all"
+            >
+              <span>{isRtl ? 'مزامنة إكسيل اليوم' : 'Daily Excel Sync'}</span>
+            </button>
+
+            <button
+              onClick={() => {
+                onOpenApkGuide();
+                onClose();
+              }}
+              className="w-full sm:flex-1 py-2 px-3 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 rounded-xl text-xs font-bold border border-indigo-700/40 flex items-center justify-center gap-2 transition-all"
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              <span>{isRtl ? 'دليل APK للأندرويد' : 'APK Guide'}</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

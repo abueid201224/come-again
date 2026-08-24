@@ -46,6 +46,7 @@ import { VerticalServicesDrawer } from './components/VerticalServicesDrawer';
 import { AndroidApkGuideModal } from './components/AndroidApkGuideModal';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { FirebaseSyncModal } from './components/FirebaseSyncModal';
+import { LogicGuideModal, type LogicGuideTab } from './components/LogicGuideModal';
 import { AuthProvider } from './context/AuthContext';
 
 // Helper for finding matching key ignoring case, whitespace, and leading zeros
@@ -84,6 +85,18 @@ export function App() {
   const [isAuditorModalOpen, setIsAuditorModalOpen] = useState(false);
   const [isServicesDrawerOpen, setIsServicesDrawerOpen] = useState(false);
   const [isApkGuideModalOpen, setIsApkGuideModalOpen] = useState(false);
+  const [isLogicGuideOpen, setIsLogicGuideOpen] = useState(false);
+  const [logicGuideInitialTab, setLogicGuideInitialTab] = useState<LogicGuideTab>('all');
+
+  const handleOpenLogicGuide = (tab?: string) => {
+    const validTabs: LogicGuideTab[] = ['all', 'audit', 'returns', 'receiving', 'inventory', 'picking', 'discrepancy', 'packaging', 'calculator'];
+    if (tab && validTabs.includes(tab as LogicGuideTab)) {
+      setLogicGuideInitialTab(tab as LogicGuideTab);
+    } else {
+      setLogicGuideInitialTab('all');
+    }
+    setIsLogicGuideOpen(true);
+  };
   const [summaryModalState, setSummaryModalState] = useState<{
     isOpen: boolean;
     invoiceNo: string;
@@ -457,6 +470,7 @@ export function App() {
         onToggleDrawer={() => setIsServicesDrawerOpen(prev => !prev)}
         onOpenApkGuide={() => setIsApkGuideModalOpen(true)}
         onOpenFirebaseModal={() => setIsFirebaseModalOpen(true)}
+        onOpenLogicGuide={handleOpenLogicGuide}
       />
 
       {/* Main Screen Content */}
@@ -466,6 +480,7 @@ export function App() {
           <ReceivingScreen
             settings={settings}
             lastScannedCode={lastScannedBarcode}
+            onOpenLogicGuide={handleOpenLogicGuide}
           />
         )}
 
@@ -485,6 +500,7 @@ export function App() {
               refreshDiscrepancies();
               refreshWrongPickings();
             }}
+            onOpenLogicGuide={handleOpenLogicGuide}
           />
         )}
 
@@ -504,6 +520,7 @@ export function App() {
               refreshDiscrepancies();
               refreshWrongPickings();
             }}
+            onOpenLogicGuide={handleOpenLogicGuide}
           />
         )}
 
@@ -512,6 +529,7 @@ export function App() {
           <InventoryCountScreen
             settings={settings}
             lastScannedCode={lastScannedBarcode}
+            onOpenLogicGuide={handleOpenLogicGuide}
           />
         )}
 
@@ -520,6 +538,7 @@ export function App() {
           <PickingWaveScreen
             settings={settings}
             lastScannedCode={lastScannedBarcode}
+            onOpenLogicGuide={handleOpenLogicGuide}
           />
         )}
 
@@ -594,6 +613,15 @@ export function App() {
         onOpenSyncModal={() => setIsSyncModalOpen(true)}
         onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
         onOpenFirebaseModal={() => setIsFirebaseModalOpen(true)}
+        onOpenLogicGuide={handleOpenLogicGuide}
+      />
+
+      {/* WMS Logic, Equations & Problem-Solving Guide Modal */}
+      <LogicGuideModal
+        isOpen={isLogicGuideOpen}
+        onClose={() => setIsLogicGuideOpen(false)}
+        initialTab={logicGuideInitialTab}
+        isRtl={isRtl}
       />
 
       {/* Firebase Cloud Sync & Auth Modal */}
