@@ -10,7 +10,8 @@ import {
   ListFilter,
   Sliders,
   Layers,
-  Smartphone
+  Smartphone,
+  Home
 } from 'lucide-react';
 import type { ActiveNavTab } from './Navbar';
 
@@ -33,32 +34,29 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   isRtl,
   onOpenApkGuide
 }) => {
-  // Map current tab icon
-  const getTabIcon = (tab: ActiveNavTab) => {
-    switch (tab) {
-      case 'receiving': return Truck;
-      case 'picking': return ListFilter;
-      case 'audit': return ScanLine;
-      case 'inventory': return Boxes;
-      case 'returns': return RotateCcw;
-      case 'errors': return AlertTriangle;
-      case 'settings': return Sliders;
-      default: return ScanLine;
-    }
-  };
-
-  const ActiveIcon = getTabIcon(currentTab);
-
   return (
     <div 
       className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 px-2 py-1.5 shadow-2xl flex items-center justify-around"
       style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 8px), 8px)' }}
     >
-      {/* 1. All Services Hub Drawer Button (Top Priority) */}
+      {/* 1. Home / Welcome Screen Button */}
+      <button
+        onClick={() => onSelectTab('welcome')}
+        id="mobile-home-btn"
+        className={`flex flex-col items-center justify-center p-1.5 min-w-[52px] rounded-xl transition-colors ${
+          currentTab === 'welcome' ? 'text-emerald-400 font-bold bg-slate-800/80' : 'text-slate-400 hover:text-slate-200'
+        }`}
+        title={isRtl ? 'الرئيسية' : 'Home'}
+      >
+        <Home className="w-5 h-5" />
+        <span className="text-[10px] mt-1">{isRtl ? 'الرئيسية' : 'Home'}</span>
+      </button>
+
+      {/* 2. All Services Hub Drawer Button */}
       <button
         onClick={onToggleDrawer}
         id="mobile-services-hub-btn"
-        className="flex flex-col items-center justify-center p-1.5 min-w-[56px] rounded-xl text-emerald-400 hover:bg-slate-800 transition-colors"
+        className="flex flex-col items-center justify-center p-1.5 min-w-[52px] rounded-xl text-emerald-400 hover:bg-slate-800 transition-colors"
         title={isRtl ? 'قائمة الخدمات والعمليات' : 'Services Hub'}
       >
         <div className="relative p-1 rounded-lg bg-emerald-950/80 border border-emerald-700/60 shadow-sm">
@@ -68,17 +66,6 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
         <span className="text-[10px] font-bold mt-1 text-slate-200">
           {isRtl ? 'الخدمات' : 'Services'}
         </span>
-      </button>
-
-      {/* 2. Wave Picking Quick Jump */}
-      <button
-        onClick={() => onSelectTab('picking')}
-        className={`flex flex-col items-center justify-center p-1.5 min-w-[56px] rounded-xl transition-colors ${
-          currentTab === 'picking' ? 'text-cyan-400 font-bold bg-slate-800/80' : 'text-slate-400 hover:text-slate-200'
-        }`}
-      >
-        <ListFilter className="w-5 h-5" />
-        <span className="text-[10px] mt-1">{isRtl ? 'الانتقاء' : 'Picking'}</span>
       </button>
 
       {/* 3. Primary Center Workstation Button (Active Audit Scanner) */}
@@ -98,7 +85,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
       {/* 4. Discrepancies Alerts */}
       <button
         onClick={() => onSelectTab('errors')}
-        className={`flex flex-col items-center justify-center p-1.5 min-w-[56px] rounded-xl transition-colors relative ${
+        className={`flex flex-col items-center justify-center p-1.5 min-w-[52px] rounded-xl transition-colors relative ${
           currentTab === 'errors' ? 'text-red-400 font-bold bg-slate-800/80' : 'text-slate-400 hover:text-slate-200'
         }`}
       >
@@ -116,7 +103,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
       {/* 5. Android APK Guide Quick Trigger */}
       <button
         onClick={onOpenApkGuide}
-        className="flex flex-col items-center justify-center p-1.5 min-w-[56px] rounded-xl text-indigo-400 hover:bg-slate-800 transition-colors"
+        className="flex flex-col items-center justify-center p-1.5 min-w-[52px] rounded-xl text-indigo-400 hover:bg-slate-800 transition-colors"
         title={isRtl ? 'دليل APK للأندرويد' : 'APK Guide'}
       >
         <Smartphone className="w-5 h-5" />
@@ -125,3 +112,4 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
     </div>
   );
 };
+

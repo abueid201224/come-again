@@ -16,7 +16,9 @@ import type {
   AggregatedPickingItem,
   WorkerExperienceLevel,
   GroupDifficultyLevel,
-  DailyAuditSnapshot
+  DailyAuditSnapshot,
+  AppUser,
+  UserRole
 } from '../types';
 
 interface InvoiceAuditorDB extends DBSchema {
@@ -895,5 +897,136 @@ export async function deletePickingWave(id: string): Promise<void> {
   const current = (await db.get('key_value', 'saved_picking_waves') as BatchPickingWave[]) || [];
   const filtered = current.filter(w => w.id !== id);
   await db.put('key_value', filtered, 'saved_picking_waves');
+}
+
+// -------------------------------------------------------------------
+// User Management & RBAC Authentication (إدارة المستخدمين والصلاحيات)
+// -------------------------------------------------------------------
+export const DEFAULT_DEMO_USERS: AppUser[] = [
+  {
+    id: 'usr-aud-101',
+    jobId: 'AUD-101',
+    phone: '0501112233',
+    name: 'أحمد حمادة',
+    role: 'AUDITOR',
+    pinCode: '1234',
+    department: 'إدارة الرقابة والجودة والتطوير',
+    title: 'مراجع ومفتش رقابي أول',
+    signatureText: 'المراجع أحمد حمادة - معتمد',
+    avatarColor: 'emerald',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'usr-sup-201',
+    jobId: 'SUP-201',
+    phone: '0502223344',
+    name: 'م. خالد الشمري',
+    role: 'SUPERVISOR',
+    pinCode: '1234',
+    department: 'إدارة العمليات واللوجستيات',
+    title: 'مشرف المستودع والورديات',
+    signatureText: 'المشرف خالد الشمري',
+    avatarColor: 'amber',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'usr-wms-301',
+    jobId: 'WMS-301',
+    phone: '0503334455',
+    name: 'محمد إبراهيم',
+    role: 'WAREHOUSE_KEEPER',
+    pinCode: '1234',
+    department: 'قسم الاستلام والتجهيز المركزي',
+    title: 'أمين مستودع رئيسي',
+    signatureText: 'أمين المستودع م. إبراهيم',
+    avatarColor: 'blue',
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: 'usr-gst-001',
+    jobId: 'GUEST-01',
+    phone: '0500000000',
+    name: 'ضيف المستودع التجريبي',
+    role: 'GUEST',
+    pinCode: '1234',
+    department: 'زائر / تدريب',
+    title: 'مستخدم تجريبي (قراءة فقط)',
+    avatarColor: 'slate',
+    createdAt: new Date().toISOString(),
+  },
+];
+
+export async function getAllAppUsers(): Promise<AppUser[]> {
+  const db = await getDB();
+  const users = await db.get('key_value', 'app_users');
+  if (!users || !Array.isArray(users) || users.length === 0) {
+    // Seed default demo accounts
+    await db.put('key_value', DEFAULT_DEMO_USERS, 'app_users');
+    return DEFAULT_DEMO_USERS;
+  }
+  return users as AppUser[];
+}
+
+export async function saveAppUser(user: AppUser): Promise<void> {
+  const db = await getDB();
+  const users = await getAllAppUsers();
+  const filtered = users.filter(u => u.id !== user.id && u.jobId.toLowerCase() !== user.jobId.toLowerCase());
+  filtered.push(user);
+  await db.put('key_value', filtered, 'app_users');
+}
+
+export async function deleteAppUser(userId: string): Promise<void> {
+  const db = await getDB();
+  const users = await getAllAppUsers();
+  const filtered = users.filter(u => u.id !== userId);
+  await db.put('key_value', filtered, 'app_users');
+}
+
+export async function getCurrentAppUser(): Promise<AppUser | null> {
+  const db = await getDB();
+  const current = await db.get('key_value', 'current_app_user');
+  if (current) return current as AppUser;
+
+  // Default to Lead Auditor if not set
+  const all = await getAllAppUsers();
+  const defaultUser = all.find(u => u.role === 'AUDITOR') || all[0] || DEFAULT_DEMO_USERS[0];
+  await setCurrentAppUser(defaultUser);
+  return defaultUser;
+}
+
+export async function setCurrentAppUser(user: AppUser | null): Promise<void> {
+  const db = await getDB();
+  await db.put('key_value', user, 'current_app_user');
+  if (user) {
+    // Also sync with auditor profile settings
+    const settings = await getAppSettings();
+    await saveAppSettings({
+      ...settings,
+      auditorName: user.name,
+      auditorId: user.jobId,
+      auditorTitle: user.title,
+      auditorSignature: user.signatureText || `${user.title || user.role} - ${user.name}`,
+    });
+  }
+}
+
+export async function authenticateAppUser(identifier: string, pin: string): Promise<AppUser | null> {
+  const cleanId = identifier.trim().toLowerCase();
+  const cleanPin = pin.trim();
+  const users = await getAllAppUsers();
+
+  const user = users.find(u => 
+    (u.jobId.toLowerCase() === cleanId || (u.phone && u.phone.trim() === cleanId)) &&
+    u.pinCode.trim() === cleanPin
+  );
+
+  if (user) {
+    const updatedUser = { ...user, lastLoginAt: new Date().toISOString() };
+    await saveAppUser(updatedUser);
+    await setCurrentAppUser(updatedUser);
+    return updatedUser;
+  }
+
+  return null;
 }
 

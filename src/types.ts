@@ -420,7 +420,7 @@ export interface BatchPickingWave {
   notes?: string;
 }
 
-export type WarehouseModuleTab = 'dashboard' | 'receiving' | 'audit' | 'returns' | 'inventory' | 'picking' | 'packaging_groups' | 'errors' | 'master' | 'settings';
+export type WarehouseModuleTab = 'dashboard' | 'welcome' | 'receiving' | 'audit' | 'returns' | 'inventory' | 'picking' | 'packaging_groups' | 'errors' | 'master' | 'settings';
 
 export type ActiveTargetColumn = 'cartons' | 'packs' | 'pieces' | 'direct_qty';
 
@@ -432,4 +432,123 @@ export interface DocumentReopenPrompt {
   title: string;
   onConfirm: () => void;
 }
+
+// -------------------------------------------------------------
+// User Management & RBAC Roles (إدارة المستخدمين والصلاحيات الرقابية)
+// -------------------------------------------------------------
+export type UserRole = 'GUEST' | 'WAREHOUSE_KEEPER' | 'SUPERVISOR' | 'AUDITOR';
+
+export interface AppUser {
+  id: string;
+  jobId: string; // Employee ID (e.g. AUD-101) or Phone (e.g. 0501234567)
+  phone?: string;
+  name: string;
+  role: UserRole;
+  pinCode: string; // 4-6 digit numeric PIN
+  department?: string;
+  title?: string;
+  signatureText?: string;
+  avatarColor?: string;
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
+export interface RolePermissionConfig {
+  role: UserRole;
+  labelAr: string;
+  labelEn: string;
+  descriptionAr: string;
+  descriptionEn: string;
+  color: string;
+  bgLight: string;
+  canAudit: boolean;
+  canReceive: boolean;
+  canCount: boolean;
+  canPick: boolean;
+  canManageReturns: boolean;
+  canApproveLab: boolean;
+  canSignReports: boolean;
+  canReopenDocuments: boolean;
+  canExportExcel: boolean;
+  canManageUsers: boolean;
+}
+
+export const ROLE_DEFINITIONS: Record<UserRole, RolePermissionConfig> = {
+  GUEST: {
+    role: 'GUEST',
+    labelAr: 'مستخدم ضيف',
+    labelEn: 'Guest User',
+    descriptionAr: 'استعراض تجريبي، اطلاع على الدليل وقاعدة البيانات (قراءة فقط)',
+    descriptionEn: 'Demo exploration, read-only guide & database access',
+    color: 'text-slate-400 border-slate-700',
+    bgLight: 'bg-slate-800/80',
+    canAudit: false,
+    canReceive: false,
+    canCount: false,
+    canPick: false,
+    canManageReturns: false,
+    canApproveLab: false,
+    canSignReports: false,
+    canReopenDocuments: false,
+    canExportExcel: false,
+    canManageUsers: false,
+  },
+  WAREHOUSE_KEEPER: {
+    role: 'WAREHOUSE_KEEPER',
+    labelAr: 'أمين مستودع',
+    labelEn: 'Warehouse Keeper',
+    descriptionAr: 'استلام التوريدات، الجرد وتفكيك العبوات، موجات الانتقاء والتجهيز، مسح الباركود',
+    descriptionEn: 'Receiving, physical cycle count, wave picking & barcode scans',
+    color: 'text-blue-400 border-blue-700',
+    bgLight: 'bg-blue-950/60',
+    canAudit: true,
+    canReceive: true,
+    canCount: true,
+    canPick: true,
+    canManageReturns: true,
+    canApproveLab: false,
+    canSignReports: false,
+    canReopenDocuments: false,
+    canExportExcel: true,
+    canManageUsers: false,
+  },
+  SUPERVISOR: {
+    role: 'SUPERVISOR',
+    labelAr: 'مشرف مستودع',
+    labelEn: 'Warehouse Supervisor',
+    descriptionAr: 'مراجعة الفروقات، فتح المستندات المقفلة، تصدير التقارير، تعيين فرق العمل',
+    descriptionEn: 'Discrepancy review, reopen closed docs, wave assignments & reports',
+    color: 'text-amber-400 border-amber-700',
+    bgLight: 'bg-amber-950/60',
+    canAudit: true,
+    canReceive: true,
+    canCount: true,
+    canPick: true,
+    canManageReturns: true,
+    canApproveLab: true,
+    canSignReports: true,
+    canReopenDocuments: true,
+    canExportExcel: true,
+    canManageUsers: true,
+  },
+  AUDITOR: {
+    role: 'AUDITOR',
+    labelAr: 'مراجع / مدقق رقابي',
+    labelEn: 'Auditor / Quality Inspector',
+    descriptionAr: 'تدقيق ومطابقة الفواتير، التحكيم المخبري للمرتجعات، التوقيع الرقمي المعتمد، رقابة ISA 500',
+    descriptionEn: 'Dispatch audit, ISA 500 compliance, lab arbitration & certified signatures',
+    color: 'text-emerald-400 border-emerald-700',
+    bgLight: 'bg-emerald-950/60',
+    canAudit: true,
+    canReceive: true,
+    canCount: true,
+    canPick: true,
+    canManageReturns: true,
+    canApproveLab: true,
+    canSignReports: true,
+    canReopenDocuments: true,
+    canExportExcel: true,
+    canManageUsers: true,
+  },
+};
 

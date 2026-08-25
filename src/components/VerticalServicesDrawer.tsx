@@ -14,17 +14,23 @@ import {
   ChevronLeft,
   X,
   Sparkles,
-  ArrowUpRight,
   Radio,
   FileSignature,
-  BookOpen
+  BookOpen,
+  Home,
+  UserCheck,
+  ShieldCheck,
+  Zap,
+  Lock
 } from 'lucide-react';
 import type { ActiveNavTab } from './Navbar';
 import type { AppSettings, SyncMetadata, ActiveInvoiceSession } from '../types';
 import type { LogicGuideTab } from './LogicGuideModal';
+import { useAuth } from '../context/AuthContext';
+import { ROLE_DEFINITIONS } from '../types';
 
 interface ServiceItem {
-  id: ActiveNavTab | 'apk-guide' | 'logic-guide';
+  id: ActiveNavTab | 'welcome' | 'apk-guide' | 'logic-guide';
   titleAr: string;
   titleEn: string;
   subtitleAr: string;
@@ -41,8 +47,8 @@ interface ServiceItem {
 interface VerticalServicesDrawerProps {
   isOpen: boolean;
   onClose: () => void;
-  currentTab: ActiveNavTab;
-  onSelectTab: (tab: ActiveNavTab | 'apk-guide') => void;
+  currentTab: ActiveNavTab | 'welcome' | null;
+  onSelectTab: (tab: ActiveNavTab | 'welcome') => void;
   settings: AppSettings;
   syncMeta: SyncMetadata;
   errorCount: number;
@@ -55,6 +61,7 @@ interface VerticalServicesDrawerProps {
   onOpenAuditorModal: () => void;
   onOpenFirebaseModal?: () => void;
   onOpenLogicGuide?: (tab?: LogicGuideTab) => void;
+  onOpenUserModal?: () => void;
 }
 
 export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
@@ -74,39 +81,29 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
   onOpenAuditorModal,
   onOpenFirebaseModal,
   onOpenLogicGuide,
+  onOpenUserModal,
 }) => {
+  const { currentAppUser, activeRole, roleConfig } = useAuth();
+
   if (!isOpen) return null;
 
-  const isRtl = settings.language === 'ar';
+  const isRtl = settings?.language === 'ar' || !settings || settings?.language === undefined;
 
   const allServices: ServiceItem[] = [
-    // 1. Inbound Receiving
+    // 0. Welcome / Home Screen
     {
-      id: 'receiving',
-      titleAr: 'الاستلام والمطابقة (Inbound Receiving)',
-      titleEn: 'Inbound Receiving & Matching',
-      subtitleAr: 'فحص الشحنات الواردة ومطابقة الكميات وأوامر الشراء',
-      subtitleEn: 'Match received consignments against purchase orders',
-      icon: Truck,
-      color: 'text-blue-400',
-      bgColor: 'bg-blue-950/40',
-      borderColor: 'border-blue-700/50',
+      id: 'welcome',
+      titleAr: 'الرئيسية (مرحباً! كيف تريد أن تبدأ؟)',
+      titleEn: 'Home (Welcome & Operation Hub)',
+      subtitleAr: 'لوحة الترحيب واختيار الخدمات المستودعية السريعة',
+      subtitleEn: 'Quick operational dashboard & service launcher',
+      icon: Home,
+      color: 'text-emerald-400',
+      bgColor: 'bg-emerald-950/40',
+      borderColor: 'border-emerald-700/50',
       category: 'core'
     },
-    // 2. Wave Picking
-    {
-      id: 'picking',
-      titleAr: 'قوائم الانتقاء والتجهيز (Wave Picking)',
-      titleEn: 'Batch Wave Picking & Preparation',
-      subtitleAr: 'تجميع الفواتير وتفكيك العبوات وإسناد المهام للعمال حسب الخبرة',
-      subtitleEn: 'Batch invoice clustering & skill-based task delegation',
-      icon: ListFilter,
-      color: 'text-cyan-400',
-      bgColor: 'bg-cyan-950/40',
-      borderColor: 'border-cyan-700/50',
-      category: 'core'
-    },
-    // 3. Outbound Audit
+    // 1. Outbound Audit
     {
       id: 'audit',
       titleAr: 'المراجعة والتدقيق والباركود (Dispatch Audit)',
@@ -119,6 +116,32 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
       borderColor: 'border-emerald-700/50',
       badge: activeSession ? (isRtl ? `فاتورة: ${activeSession.invoiceNo}` : `Inv: ${activeSession.invoiceNo}`) : null,
       badgeColor: 'bg-emerald-900/80 text-emerald-300 border border-emerald-600/50',
+      category: 'core'
+    },
+    // 2. Inbound Receiving
+    {
+      id: 'receiving',
+      titleAr: 'الاستلام والمطابقة (Inbound Receiving)',
+      titleEn: 'Inbound Receiving & Matching',
+      subtitleAr: 'فحص الشحنات الواردة ومطابقة الكميات وأوامر الشراء',
+      subtitleEn: 'Match received consignments against purchase orders',
+      icon: Truck,
+      color: 'text-blue-400',
+      bgColor: 'bg-blue-950/40',
+      borderColor: 'border-blue-700/50',
+      category: 'core'
+    },
+    // 3. Wave Picking
+    {
+      id: 'picking',
+      titleAr: 'قوائم الانتقاء والتجهيز (Wave Picking)',
+      titleEn: 'Batch Wave Picking & Preparation',
+      subtitleAr: 'تجميع الفواتير وتفكيك العبوات وإسناد المهام للعمال حسب الخبرة',
+      subtitleEn: 'Batch invoice clustering & skill-based task delegation',
+      icon: ListFilter,
+      color: 'text-cyan-400',
+      bgColor: 'bg-cyan-950/40',
+      borderColor: 'border-cyan-700/50',
       category: 'core'
     },
     // 4. Inventory & Cycle Count
@@ -210,10 +233,11 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
   ];
 
   // Separate active service from inactive services so Active is ALWAYS ON TOP!
-  const activeServiceItem = allServices.find(s => s.id === currentTab) || allServices[0];
-  const otherServices = allServices.filter(s => s.id !== currentTab);
+  const effectiveTab = currentTab || 'welcome';
+  const activeServiceItem = allServices.find(s => s.id === effectiveTab) || allServices[0];
+  const otherServices = allServices.filter(s => s.id !== effectiveTab);
 
-  const handleSelect = (serviceId: ActiveNavTab | 'apk-guide' | 'logic-guide') => {
+  const handleSelect = (serviceId: ActiveNavTab | 'welcome' | 'apk-guide' | 'logic-guide') => {
     if (serviceId === 'apk-guide') {
       onOpenApkGuide();
     } else if (serviceId === 'logic-guide') {
@@ -263,25 +287,26 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
           </button>
         </div>
 
-        {/* Auditor Profile Quick Strip */}
+        {/* User Account & Role Profile Strip */}
         <div className="bg-slate-950/90 px-4 py-2.5 border-b border-slate-800 flex items-center justify-between text-xs">
           <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-slate-300 font-bold">{settings.auditorName || 'أحمد حمادة'}</span>
-            <span className="font-mono text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded border border-slate-700">
-              {settings.auditorId || 'AUD-101'}
+            <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-slate-200 font-bold">{currentAppUser?.name || settings.auditorName || 'أحمد حمادة'}</span>
+            <span className={`text-[10px] px-2 py-0.5 rounded font-mono font-semibold border ${roleConfig.color} ${roleConfig.bgLight}`}>
+              {isRtl ? roleConfig.labelAr : roleConfig.labelEn}
             </span>
           </div>
 
           <button
             onClick={() => {
-              onOpenAuditorModal();
+              if (onOpenUserModal) onOpenUserModal();
+              else onOpenAuditorModal();
               onClose();
             }}
-            className="text-emerald-400 hover:text-emerald-300 font-bold flex items-center gap-1 text-[11px]"
+            className="text-emerald-400 hover:text-emerald-300 font-bold flex items-center gap-1 text-[11px] bg-emerald-950/60 hover:bg-emerald-900/80 px-2.5 py-1 rounded-lg border border-emerald-700/50 transition-colors"
           >
-            <FileSignature className="w-3 h-3" />
-            <span>{isRtl ? 'تعديل التوقيع' : 'Edit Signature'}</span>
+            <UserCheck className="w-3.5 h-3.5" />
+            <span>{isRtl ? 'تبديل المستخدم' : 'Switch User'}</span>
           </button>
         </div>
 
@@ -293,10 +318,12 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
             <div className="flex items-center justify-between px-1">
               <span className="text-[11px] font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
                 <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-                {isRtl ? 'الخدمة النشطة الحالية (Active Workstation)' : 'Currently Active Workstation'}
+                {isRtl ? 'الخدمة النشطة الحالية (Active Service)' : 'Currently Active Service'}
               </span>
               <span className="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800/80 px-2 py-0.5 rounded-full font-bold">
-                {isRtl ? 'قيد العمل الآن' : 'In Progress'}
+                {effectiveTab === 'welcome' 
+                  ? (isRtl ? 'الشاشة الرئيسية' : 'Home Hub') 
+                  : (isRtl ? 'قيد العمل الآن' : 'In Progress')}
               </span>
             </div>
 
@@ -331,10 +358,12 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
                 </div>
               </div>
 
-              {/* Quick Resume Button */}
+              {/* Quick Action Button */}
               <div className="mt-3.5 pt-3 border-t border-slate-800/60 flex items-center justify-between">
                 <span className="text-xs text-emerald-300 font-bold">
-                  {isRtl ? 'أنت تعمل على هذه الخدمة حالياً' : 'You are currently working here'}
+                  {effectiveTab === 'welcome' 
+                    ? (isRtl ? 'أنت في الشاشة الرئيسية' : 'You are in Home Hub')
+                    : (isRtl ? 'أنت تعمل على هذه الخدمة حالياً' : 'You are currently working here')}
                 </span>
                 <button
                   onClick={onClose}
@@ -398,7 +427,7 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
           {onOpenLogicGuide && (
             <button
               onClick={() => {
-                onOpenLogicGuide(currentTab as LogicGuideTab);
+                onOpenLogicGuide('all');
                 onClose();
               }}
               className="w-full py-2 px-3 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 rounded-xl text-xs font-bold border border-purple-700/40 flex items-center justify-center gap-2 transition-all shadow-sm"
@@ -447,3 +476,4 @@ export const VerticalServicesDrawer: React.FC<VerticalServicesDrawerProps> = ({
     </div>
   );
 };
+

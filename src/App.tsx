@@ -47,7 +47,9 @@ import { AndroidApkGuideModal } from './components/AndroidApkGuideModal';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { FirebaseSyncModal } from './components/FirebaseSyncModal';
 import { LogicGuideModal, type LogicGuideTab } from './components/LogicGuideModal';
-import { AuthProvider } from './context/AuthContext';
+import { WelcomeDashboardScreen } from './components/WelcomeDashboardScreen';
+import { UserAuthModal } from './components/UserAuthModal';
+import { AuthProvider, useAuth } from './context/AuthContext';
 
 // Helper for finding matching key ignoring case, whitespace, and leading zeros
 function findMatchingItemKey(items: Record<string, ScannedAuditItem>, code: string): string | null {
@@ -65,7 +67,8 @@ function findMatchingItemKey(items: Record<string, ScannedAuditItem>, code: stri
 }
 
 export function App() {
-  const [currentTab, setCurrentTab] = useState<ActiveNavTab>('audit');
+  const { currentAppUser, roleConfig, hasRole } = useAuth();
+  const [currentTab, setCurrentTab] = useState<ActiveNavTab>('welcome');
   const [activeSession, setActiveSession] = useState<ActiveInvoiceSession | null>(null);
   const [discrepancies, setDiscrepancies] = useState<AuditDiscrepancy[]>([]);
   const [wrongPickings, setWrongPickings] = useState<WrongPickingItem[]>([]);
@@ -83,10 +86,12 @@ export function App() {
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [isFirebaseModalOpen, setIsFirebaseModalOpen] = useState(false);
   const [isAuditorModalOpen, setIsAuditorModalOpen] = useState(false);
+  const [isUserModalOpen, setIsUserModalOpen] = useState(false);
   const [isServicesDrawerOpen, setIsServicesDrawerOpen] = useState(false);
   const [isApkGuideModalOpen, setIsApkGuideModalOpen] = useState(false);
   const [isLogicGuideOpen, setIsLogicGuideOpen] = useState(false);
   const [logicGuideInitialTab, setLogicGuideInitialTab] = useState<LogicGuideTab>('all');
+
 
   const handleOpenLogicGuide = (tab?: string) => {
     const validTabs: LogicGuideTab[] = ['all', 'audit', 'returns', 'receiving', 'inventory', 'picking', 'discrepancy', 'packaging', 'calculator'];
@@ -467,6 +472,7 @@ export function App() {
         canInstallPwa={Boolean(deferredInstallPrompt)}
         onInstallPwa={handleInstallPwa}
         onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
+        onOpenUserModal={() => setIsUserModalOpen(true)}
         onToggleDrawer={() => setIsServicesDrawerOpen(prev => !prev)}
         onOpenApkGuide={() => setIsApkGuideModalOpen(true)}
         onOpenFirebaseModal={() => setIsFirebaseModalOpen(true)}
@@ -475,6 +481,24 @@ export function App() {
 
       {/* Main Screen Content */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 pb-20 md:pb-6">
+        {/* 0. Home & Welcome Screen (When no active workstation is selected) */}
+        {currentTab === 'welcome' && (
+          <WelcomeDashboardScreen
+            syncMeta={syncMeta}
+            activeSession={activeSession}
+            errorCount={discrepancies.length + wrongPickings.length}
+            pendingLabCount={pendingLabCount}
+            overdueLabCount={overdueLabCount}
+            onSelectService={(tab) => setCurrentTab(tab)}
+            onOpenSyncModal={() => setIsSyncModalOpen(true)}
+            onOpenLogicGuide={handleOpenLogicGuide}
+            onOpenUserModal={() => setIsUserModalOpen(true)}
+            onOpenApkGuide={() => setIsApkGuideModalOpen(true)}
+            settings={settings}
+            isRtl={isRtl}
+          />
+        )}
+
         {/* 1. Inbound Receiving Screen */}
         {currentTab === 'receiving' && (
           <ReceivingScreen
@@ -612,8 +636,15 @@ export function App() {
         onOpenApkGuide={() => setIsApkGuideModalOpen(true)}
         onOpenSyncModal={() => setIsSyncModalOpen(true)}
         onOpenAuditorModal={() => setIsAuditorModalOpen(true)}
+        onOpenUserModal={() => setIsUserModalOpen(true)}
         onOpenFirebaseModal={() => setIsFirebaseModalOpen(true)}
         onOpenLogicGuide={handleOpenLogicGuide}
+      />
+
+      {/* User Accounts & RBAC Roles Authentication Modal */}
+      <UserAuthModal
+        isOpen={isUserModalOpen}
+        onClose={() => setIsUserModalOpen(false)}
       />
 
       {/* WMS Logic, Equations & Problem-Solving Guide Modal */}

@@ -22,13 +22,17 @@ import {
   ChevronDown,
   Cloud,
   BookOpen,
-  HelpCircle
+  HelpCircle,
+  Home,
+  ShieldCheck
 } from 'lucide-react';
 import type { SyncMetadata, AppSettings } from '../types';
 import { translations } from '../services/i18n';
 import type { LogicGuideTab } from './LogicGuideModal';
+import { useAuth } from '../context/AuthContext';
+import { ROLE_DEFINITIONS } from '../types';
 
-export type ActiveNavTab = 'audit' | 'receiving' | 'returns' | 'inventory' | 'picking' | 'errors' | 'master' | 'settings';
+export type ActiveNavTab = 'welcome' | 'audit' | 'receiving' | 'returns' | 'inventory' | 'picking' | 'errors' | 'master' | 'settings';
 
 interface NavbarProps {
   currentTab: ActiveNavTab;
@@ -46,6 +50,7 @@ interface NavbarProps {
   canInstallPwa?: boolean;
   onInstallPwa?: () => void;
   onOpenAuditorModal?: () => void;
+  onOpenUserModal?: () => void;
   onToggleDrawer?: () => void;
   onOpenApkGuide?: () => void;
   onOpenFirebaseModal?: () => void;
@@ -68,16 +73,19 @@ export const Navbar: React.FC<NavbarProps> = ({
   canInstallPwa,
   onInstallPwa,
   onOpenAuditorModal,
+  onOpenUserModal,
   onToggleDrawer,
   onOpenApkGuide,
   onOpenFirebaseModal,
   onOpenLogicGuide,
 }) => {
+  const { currentAppUser, roleConfig } = useAuth();
   const t = translations[settings.language] || translations.en;
   const isRtl = settings.language === 'ar';
 
   const getActiveTabTitle = () => {
     switch (currentTab) {
+      case 'welcome': return isRtl ? 'الرئيسية (مرحباً! كيف تريد أن تبدأ؟)' : 'Home Hub';
       case 'receiving': return isRtl ? 'الاستلام والمطابقة' : 'Receiving';
       case 'picking': return isRtl ? 'قائمة الانتقاء والتجهيز' : 'Wave Picking';
       case 'audit': return isRtl ? 'المراجعة والتدقيق والباركود' : 'Dispatch Audit';
@@ -111,12 +119,19 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-emerald-600 text-white font-bold shadow-inner">
+          <div 
+            onClick={() => setCurrentTab('welcome')}
+            className="flex items-center justify-center w-10 h-10 rounded-lg bg-emerald-600 text-white font-bold shadow-inner cursor-pointer hover:bg-emerald-500 transition-colors"
+            title={isRtl ? 'العودة للشاشة الرئيسية' : 'Return to Home'}
+          >
             <ScanLine className="w-6 h-6 animate-pulse" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-base sm:text-lg font-bold tracking-tight text-white">
+              <h1 
+                onClick={() => setCurrentTab('welcome')}
+                className="text-base sm:text-lg font-bold tracking-tight text-white cursor-pointer hover:text-emerald-300 transition-colors"
+              >
                 {t.appTitle}
               </h1>
               <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-emerald-950/80 text-emerald-400 border border-emerald-700/50 px-2 py-0.5 rounded-full">
@@ -125,7 +140,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400 hidden sm:block">
-              {isRtl ? 'دعم كامل لقارئ الباركود والإسكان العشوائي للأصناف ومزامنة إكسيل والتوثيق الرقابي' : '1D USB/Bluetooth Barcode Scanner Wedge & Audit Documentation'}
+              {isRtl ? 'نظام المستودعات الذكي Offline-First — تدقيق الفواتير والجرد وإدارة الصلاحيات' : 'Offline-First Smart WMS & Barcode Verification'}
             </p>
           </div>
         </div>
@@ -136,7 +151,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {onOpenLogicGuide && (
             <button
               id="navbar-logic-guide-btn"
-              onClick={() => onOpenLogicGuide(currentTab as LogicGuideTab)}
+              onClick={() => onOpenLogicGuide(currentTab === 'welcome' ? 'all' : (currentTab as LogicGuideTab))}
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-purple-500/40 bg-purple-950/40 hover:bg-purple-900/60 text-xs font-bold text-purple-300 transition-all shadow-sm active:scale-95"
               title={isRtl ? 'دليل المنطق والمعادلات والحلول الرقابية وطرق بناء الفرضيات' : 'WMS Logic, Math Formulas & Troubleshooting Guide'}
             >
@@ -158,22 +173,22 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          {/* Auditor Profile & Signature Trigger */}
-          {onOpenAuditorModal && (
-            <button
-              onClick={onOpenAuditorModal}
-              id="navbar-auditor-profile-btn"
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-emerald-600/50 bg-slate-800/90 hover:bg-slate-700 text-xs font-semibold text-emerald-300 transition-colors shadow-sm"
-              title={isRtl ? 'إعدادات وهوية وتوقيع المراجع المسؤول' : 'Lead Auditor Profile & Digital Signature'}
-            >
-              <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="hidden lg:inline">{settings.auditorName || 'أحمد حمادة'}</span>
-              <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1 py-0.2 rounded font-mono border border-emerald-800">
-                {settings.auditorId || 'AUD-101'}
-              </span>
-              <FileSignature className="w-3 h-3 text-emerald-400 hidden sm:inline" />
-            </button>
-          )}
+          {/* User Account & Role Trigger Button */}
+          <button
+            onClick={() => {
+              if (onOpenUserModal) onOpenUserModal();
+              else if (onOpenAuditorModal) onOpenAuditorModal();
+            }}
+            id="navbar-user-profile-btn"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-emerald-600/50 bg-slate-800/90 hover:bg-slate-700 text-xs font-semibold text-emerald-300 transition-colors shadow-sm"
+            title={isRtl ? 'إدارة المستخدمين والصلاحيات والتبديل السريع' : 'User Account & RBAC Permissions'}
+          >
+            <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden lg:inline">{currentAppUser?.name || settings.auditorName || 'المستخدم'}</span>
+            <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono font-bold border ${roleConfig.color} ${roleConfig.bgLight}`}>
+              {isRtl ? roleConfig.labelAr : roleConfig.labelEn}
+            </span>
+          </button>
 
           {/* PWA Install Button (When prompt available) */}
           {canInstallPwa && (
@@ -268,7 +283,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           <div className="flex items-center gap-1.5">
             {onOpenLogicGuide && (
               <button
-                onClick={() => onOpenLogicGuide(currentTab as LogicGuideTab)}
+                onClick={() => onOpenLogicGuide(currentTab === 'welcome' ? 'all' : (currentTab as LogicGuideTab))}
                 className="text-[11px] text-purple-300 hover:text-purple-200 font-bold flex items-center gap-1 bg-purple-950/60 px-2 py-0.5 rounded border border-purple-800/40 transition-all"
                 title={isRtl ? 'فتح دليل المنطق والمعادلات والحلول لهذه الخدمة' : 'Open Logic & Formula Guide for this service'}
               >
@@ -282,7 +297,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               className="text-[11px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center gap-1 bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-800/40"
             >
               <Sparkles className="w-3 h-3 text-indigo-400" />
-              <span>{isRtl ? 'تبديل الخدمة الرأسية' : 'Switch Service'}</span>
+              <span>{isRtl ? 'قائمة الخدمات' : 'Services Menu'}</span>
             </button>
           </div>
         </div>
@@ -291,6 +306,20 @@ export const Navbar: React.FC<NavbarProps> = ({
       {/* Primary Navigation Tabs */}
       <div className="bg-slate-950/90 border-t border-slate-800/80 px-2 sm:px-4 hidden sm:block">
         <nav className="max-w-7xl mx-auto flex items-center gap-1 sm:gap-2 overflow-x-auto py-1.5 scrollbar-none">
+          {/* 0. Welcome / Home Screen */}
+          <button
+            id="nav-welcome-tab"
+            onClick={() => setCurrentTab('welcome')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
+              currentTab === 'welcome'
+                ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400'
+                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+            }`}
+          >
+            <Home className="w-4 h-4" />
+            <span>{isRtl ? 'الرئيسية' : 'Home'}</span>
+          </button>
+
           {/* 1. Inbound Receiving */}
           <button
             id="nav-receiving-tab"
@@ -438,5 +467,6 @@ export const Navbar: React.FC<NavbarProps> = ({
     </header>
   );
 };
+
 
 
