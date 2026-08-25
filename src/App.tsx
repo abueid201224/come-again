@@ -121,15 +121,24 @@ export function App() {
   });
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
 
-  // Listen for PWA Install Prompt
+  // Listen for PWA Install Prompt & Installed status
   useEffect(() => {
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault();
       setDeferredInstallPrompt(e);
     };
 
+    const handleAppInstalled = () => {
+      setDeferredInstallPrompt(null);
+      console.log('WMS PWA was installed successfully');
+    };
+
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleAppInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
   }, []);
 
   const handleInstallPwa = async () => {

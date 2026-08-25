@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v2-offline-auditor';
+const CACHE_VERSION = 'v3-offline-wms-pwa';
 const STATIC_CACHE = `static-${CACHE_VERSION}`;
 const RUNTIME_CACHE = `runtime-${CACHE_VERSION}`;
 
@@ -7,7 +7,13 @@ const PRECACHE_URLS = [
   '/',
   '/index.html',
   '/manifest.json',
+  '/icon-48.png',
+  '/icon-72.png',
+  '/icon-96.png',
+  '/icon-128.png',
+  '/icon-144.png',
   '/icon-192.png',
+  '/icon-384.png',
   '/icon-512.png',
   '/maskable-icon-512.png',
   '/icon.svg'
@@ -35,7 +41,7 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// 3. Fetch Event: Network-first with Cache Fallback for API, Cache-first / Stale-While-Revalidate for Assets
+// 3. Fetch Event: Network-first with Cache Fallback for Navigation/API, Cache-first / Stale-While-Revalidate for Assets
 self.addEventListener('fetch', (event) => {
   const request = event.request;
 
@@ -73,7 +79,7 @@ self.addEventListener('fetch', (event) => {
             caches.open(RUNTIME_CACHE).then((cache) => cache.put(request, networkResponse));
           }
         }).catch(() => {
-          // Offline, ignore
+          // Offline, silently ignore
         });
         return cachedResponse;
       }
@@ -89,7 +95,7 @@ self.addEventListener('fetch', (event) => {
       }).catch(async () => {
         // Fallback for missing images or assets
         if (request.destination === 'image') {
-          return caches.match('/icon.svg');
+          return caches.match('/icon.svg') || caches.match('/icon-192.png');
         }
         return null;
       });
