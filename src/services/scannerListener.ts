@@ -3,20 +3,21 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 export interface BarcodeScanEvent {
   barcode: string;
   timestamp: number;
-  isFastWedge: boolean; // whether it arrived via ultra-fast scanner cadence
+  isFastWedge: boolean; // whether it arrived via ultra-fast scanner cadence (< 50ms)
+  source?: 'hardware_wedge' | 'camera' | 'intent_broadcast' | 'manual';
 }
 
 interface UseScannerListenerOptions {
   onScan: (barcode: string, isFastWedge: boolean) => void;
   minLength?: number;
-  maxKeystrokeIntervalMs?: number; // threshold in ms to distinguish hardware scanner from slow human typing
+  maxKeystrokeIntervalMs?: number; // threshold in ms to distinguish hardware scanner from slow human typing (50ms for high-speed laser scanners)
   enabled?: boolean;
 }
 
 export function useScannerListener({
   onScan,
   minLength = 2,
-  maxKeystrokeIntervalMs = 80,
+  maxKeystrokeIntervalMs = 50, // Low latency threshold for Zebra & Honeywell PDAs
   enabled = true,
 }: UseScannerListenerOptions) {
   const [lastScannedBarcode, setLastScannedBarcode] = useState<string | null>(null);
@@ -42,6 +43,7 @@ export function useScannerListener({
   useEffect(() => {
     if (!enabled) return;
 
+    // 1. Hardware Keystroke Wedge Listener (USB, Bluetooth, Zebra DataWedge, Honeywell, Urovo)
     const handleKeyDown = (e: KeyboardEvent) => {
       // Allow Escape key to clear buffer
       if (e.key === 'Escape') {
@@ -51,27 +53,25 @@ export function useScannerListener({
         return;
       }
 
-      // Ignore modifier keys
+      // Ignore standard modifier keys
       if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
         return;
       }
 
-      // Check if user is typing into a standard search/form input (unless it's our scanner designated input)
       const target = e.target as HTMLElement;
-      const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
-      const isScannerDedicatedInput = target.getAttribute('data-scanner-input') === 'true';
+      const isInput = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+      const isScannerDedicatedInput = target?.getAttribute('data-scanner-input') === 'true';
 
-      // If user is typing in a non-scanner input, only intercept if it's super-fast barcode wedge speed (< 40ms)
       const currentTime = Date.now();
       const interval = currentTime - lastKeyTimeRef.current;
       lastKeyTimeRef.current = currentTime;
 
       // Detect Enter key = scanner transmission terminator
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' || e.key === 'Tab') {
         const currentBuffer = bufferRef.current;
         const total = totalKeyCountRef.current;
         const fast = fastKeyCountRef.current;
-        const isFastWedge = total > 0 && (fast / total) > 0.6;
+        const isFastWedge = total > 0 && (fast / total) > 0.5;
 
         bufferRef.current = '';
         fastKeyCountRef.current = 0;
@@ -88,7 +88,6 @@ export function useScannerListener({
         }
 
         if (currentBuffer.trim().length >= minLength) {
-          // If scanner scanned into an unrelated input, prevent newline
           if (isInput) {
             e.preventDefault();
           }
@@ -106,7 +105,7 @@ export function useScannerListener({
 
         bufferRef.current += e.key;
 
-        // Auto-clear buffer if user pauses for more than 500ms (to prevent stale accidental typing)
+        // Auto-clear buffer if user pauses for more than 400ms (prevents lingering partial scans)
         if (clearTimerRef.current) {
           window.clearTimeout(clearTimerRef.current);
         }
@@ -114,14 +113,29 @@ export function useScannerListener({
           bufferRef.current = '';
           fastKeyCountRef.current = 0;
           totalKeyCountRef.current = 0;
-        }, 600);
+        }, 400);
+      }
+    };
+
+    // 2. Android Custom Broadcast Intent Listeners (DataWedge / Honeywell Webview bridge)
+    const handleCustomScanEvent = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      const scannedData = customEvt.detail?.barcode || customEvt.detail?.data || customEvt.detail?.scanData;
+      if (typeof scannedData === 'string' && scannedData.trim().length >= minLength) {
+        handleScanTrigger(scannedData.trim(), true);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('wms_barcode_scan', handleCustomScanEvent);
+    window.addEventListener('datawedge_scan', handleCustomScanEvent);
+    window.addEventListener('honeywell_scan', handleCustomScanEvent);
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('wms_barcode_scan', handleCustomScanEvent);
+      window.removeEventListener('datawedge_scan', handleCustomScanEvent);
+      window.removeEventListener('honeywell_scan', handleCustomScanEvent);
       if (clearTimerRef.current) {
         window.clearTimeout(clearTimerRef.current);
       }

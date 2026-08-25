@@ -11,16 +11,7 @@
   "android": {
     "allowMixedContent": true,
     "captureInput": true,
-    "webContentsDebuggingEnabled": true,
-    "backgroundColor": "#020617",
-    "overrideUserAgent": "WMS-Auditor-Android"
-  },
-  "plugins": {
-    "CapacitorCookies": {
-      "enabled": true
-    },
-    "CapacitorHttp": {
-      "enabled": true
-    }
+    "webContentsDebuggingEnabled": false,
+    "backgroundColor": "#020617"
   }
 }
